@@ -19,15 +19,18 @@ import {
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { API_SESSION_COOKIE, API_SESSION_HEADER } from "./lib/api-session";
+import { buildCompletionMessages } from "./lib/completion";
 import {
   ChatGroup,
   ChatMessage,
   ChatSession,
-  CompletionMessage,
   ModelConfig,
   PublicProvider,
   Workspace,
 } from "./lib/types";
+
+type View = { type: "home" } | { type: "group"; groupId: string } | { type: "chat"; chatId: string };
 
 type PendingChat = {
   status: "streaming" | "error";
@@ -46,14 +49,12 @@ type ProvidersResponse = {
   error?: string;
 };
 
-const ACTIVE_GROUP_KEY = "chat-web:active-group";
-const ACTIVE_CHAT_KEY = "chat-web:active-chat";
+const LAST_MODEL_KEY = "chat-web:last-model";
 
 export default function Home() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [providers, setProviders] = useState<PublicProvider[]>([]);
-  const [activeGroupId, setActiveGroupId] = useState("");
-  const [activeChatId, setActiveChatId] = useState("");
+  const [view, setView] = useState<View>({ type: "home" });
   const [draft, setDraft] = useState("");
   const [titleDraft, setTitleDraft] = useState("");
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
@@ -61,6 +62,9 @@ export default function Home() {
   const [pendingByChat, setPendingByChat] = useState<Record<string, PendingChat>>({});
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [lastModelId, setLastModelId] = useState("");
+  const [defaultPromptDraft, setDefaultPromptDraft] = useState("");
+
   const [modelFormOpen, setModelFormOpen] = useState(false);
   const [modelName, setModelName] = useState("");
   const [modelId, setModelId] = useState("");
@@ -69,6 +73,7 @@ export default function Home() {
   const [editingModelName, setEditingModelName] = useState("");
   const [editingModelModel, setEditingModelModel] = useState("");
   const [editingModelProviderId, setEditingModelProviderId] = useState("");
+
   const [providerFormOpen, setProviderFormOpen] = useState(false);
   const [newProviderId, setNewProviderId] = useState("");
   const [newProviderName, setNewProviderName] = useState("");
@@ -77,57 +82,65 @@ export default function Home() {
 
   const abortControllers = useRef(new Map<string, AbortController>());
   const streamContent = useRef(new Map<string, string>());
+  const defaultPromptDirty = useRef(false);
+  const workspaceRequestSeq = useRef(0);
+  const appliedWorkspaceRequestSeq = useRef(0);
+  const providersRequestSeq = useRef(0);
+  const appliedProvidersRequestSeq = useRef(0);
 
   useEffect(() => {
-    setActiveGroupId(window.localStorage.getItem(ACTIVE_GROUP_KEY) || "");
-    setActiveChatId(window.localStorage.getItem(ACTIVE_CHAT_KEY) || "");
+    setLastModelId(window.localStorage.getItem(LAST_MODEL_KEY) || "");
     void loadInitialData();
   }, []);
 
-  useEffect(() => {
-    if (activeGroupId) {
-      window.localStorage.setItem(ACTIVE_GROUP_KEY, activeGroupId);
-    }
-    if (activeChatId) {
-      window.localStorage.setItem(ACTIVE_CHAT_KEY, activeChatId);
-    }
-  }, [activeChatId, activeGroupId]);
-
-  const activeGroup = useMemo(
-    () => workspace?.groups.find((group) => group.id === activeGroupId) ?? workspace?.groups[0] ?? null,
-    [activeGroupId, workspace],
+  const allChats = useMemo(
+    () => [
+      ...(workspace?.defaultGroup.chats ?? []),
+      ...(workspace?.groups.flatMap((group) => group.chats) ?? []),
+    ],
+    [workspace],
   );
   const activeChat = useMemo(
+    () => (view.type === "chat" ? allChats.find((chat) => chat.id === view.chatId) ?? null : null),
+    [allChats, view],
+  );
+  const activeChatGroup = useMemo(
+    () => (activeChat && workspace ? findGroupForChat(workspace, activeChat.id) : null),
+    [activeChat, workspace],
+  );
+  const activeGroup = useMemo(
     () =>
-      activeGroup?.chats.find((chat) => chat.id === activeChatId) ??
-      activeGroup?.chats[0] ??
-      workspace?.groups.flatMap((group) => group.chats)[0] ??
-      null,
-    [activeChatId, activeGroup, workspace],
+      view.type === "group" ? workspace?.groups.find((group) => group.id === view.groupId) ?? null : null,
+    [view, workspace],
   );
-  const activeModel = useMemo(
-    () => workspace?.models.find((model) => model.id === activeChat?.modelId) ?? workspace?.models[0] ?? null,
-    [activeChat?.modelId, workspace],
-  );
+  const selectedModel = useMemo(() => {
+    if (!workspace?.models.length) {
+      return null;
+    }
+    return workspace.models.find((model) => model.id === lastModelId) ?? workspace.models[0];
+  }, [lastModelId, workspace]);
   const activePending = activeChat ? pendingByChat[activeChat.id] : undefined;
 
   useEffect(() => {
-    if (!workspace) {
+    if (!workspace?.models.length) {
       return;
     }
-    const fallbackGroup = activeGroup ?? workspace.groups[0];
-    const fallbackChat = activeChat ?? fallbackGroup?.chats[0];
-    if (fallbackGroup && fallbackGroup.id !== activeGroupId) {
-      setActiveGroupId(fallbackGroup.id);
+    const model = workspace.models.find((item) => item.id === lastModelId) ?? workspace.models[0];
+    if (model.id !== lastModelId) {
+      setLastModelId(model.id);
+      window.localStorage.setItem(LAST_MODEL_KEY, model.id);
     }
-    if (fallbackChat && fallbackChat.id !== activeChatId) {
-      setActiveChatId(fallbackChat.id);
-    }
-  }, [activeChat, activeChatId, activeGroup, activeGroupId, workspace]);
+  }, [lastModelId, workspace?.models]);
 
   useEffect(() => {
     setTitleDraft(activeChat?.title ?? "");
   }, [activeChat?.id, activeChat?.title]);
+
+  useEffect(() => {
+    if (!defaultPromptDirty.current) {
+      setDefaultPromptDraft(workspace?.defaultGroup.systemPrompt ?? "");
+    }
+  }, [workspace?.defaultGroup.systemPrompt]);
 
   useEffect(() => {
     if (!providerId && providers[0]) {
@@ -141,10 +154,7 @@ export default function Home() {
       fetch("/api/providers"),
     ]);
     const workspaceData = (await workspaceResponse.json()) as WorkspaceResponse;
-    const providersData = (await providersResponse.json()) as {
-      providers?: PublicProvider[];
-      error?: string;
-    };
+    const providersData = (await providersResponse.json()) as ProvidersResponse;
     if (workspaceData.error) {
       throw new Error(workspaceData.error);
     }
@@ -156,26 +166,28 @@ export default function Home() {
   }
 
   async function loadProviders() {
+    const requestId = ++providersRequestSeq.current;
     const response = await fetch("/api/providers");
     const data = (await response.json()) as ProvidersResponse;
     if (!response.ok || data.error) {
       throw new Error(data.error || "Failed to load providers.");
     }
-    setProviders(data.providers);
+    applyProvidersSnapshot(data.providers, requestId);
     return data.providers;
   }
 
   async function runWorkspaceAction<T>(action: Record<string, unknown>) {
-    const response = await fetch("/api/workspace", {
+    const requestId = ++workspaceRequestSeq.current;
+    const response = await fetchWithSessionRetry("/api/workspace", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getJsonApiHeaders(),
       body: JSON.stringify(action),
     });
     const data = (await response.json()) as WorkspaceResponse & { result?: T };
     if (!response.ok || data.error) {
       throw new Error(data.error || "Workspace update failed.");
     }
-    setWorkspace(data.workspace);
+    applyWorkspaceSnapshot(data.workspace, requestId);
     return data;
   }
 
@@ -184,48 +196,95 @@ export default function Home() {
     payload?: Record<string, unknown>,
     providerIdToDelete?: string,
   ) {
+    const requestId = ++providersRequestSeq.current;
     const target =
       method === "DELETE" ? `/api/providers?id=${encodeURIComponent(providerIdToDelete || "")}` : "/api/providers";
-    const response = await fetch(target, {
+    const response = await fetchWithSessionRetry(target, {
       method,
-      headers: payload ? { "Content-Type": "application/json" } : undefined,
+      headers: payload ? getJsonApiHeaders() : getApiSessionHeaders(),
       body: payload ? JSON.stringify(payload) : undefined,
     });
     const data = (await response.json()) as ProvidersResponse;
     if (!response.ok || data.error) {
       throw new Error(data.error || "Provider update failed.");
     }
-    setProviders(data.providers);
+    applyProvidersSnapshot(data.providers, requestId);
     return data;
+  }
+
+  function applyWorkspaceSnapshot(nextWorkspace: Workspace, requestId: number) {
+    if (requestId < appliedWorkspaceRequestSeq.current) {
+      return;
+    }
+    appliedWorkspaceRequestSeq.current = requestId;
+    const liveContent = new Map(streamContent.current);
+    setWorkspace(mergeStreamingContent(nextWorkspace, liveContent));
+  }
+
+  function applyProvidersSnapshot(nextProviders: PublicProvider[], requestId: number) {
+    if (requestId < appliedProvidersRequestSeq.current) {
+      return;
+    }
+    appliedProvidersRequestSeq.current = requestId;
+    setProviders(nextProviders);
   }
 
   async function handleSend(event: FormEvent) {
     event.preventDefault();
-    if (!activeChat || !activeGroup || !activeModel) {
-      return;
-    }
     const content = draft.trim();
-    if (!content || pendingByChat[activeChat.id]?.status === "streaming") {
+    if (!content || !workspace || !selectedModel) {
       return;
     }
+
+    let chatId = activeChat?.id ?? "";
+    let nextWorkspace = workspace;
+    if (!chatId) {
+      const groupId = view.type === "group" ? view.groupId : undefined;
+      const created = await runWorkspaceAction<{ chatId: string }>({
+        type: "createChat",
+        groupId,
+        modelId: selectedModel.id,
+      });
+      chatId = created.result?.chatId ?? "";
+      nextWorkspace = created.workspace;
+      if (chatId) {
+        setView({ type: "chat", chatId });
+      }
+    }
+    if (!chatId || pendingByChat[chatId]?.status === "streaming") {
+      return;
+    }
+
+    const targetChat = findChat(nextWorkspace, chatId);
+    if (targetChat && targetChat.modelId !== selectedModel.id) {
+      const modelData = await runWorkspaceAction({
+        type: "setChatModel",
+        chatId,
+        modelId: selectedModel.id,
+      });
+      nextWorkspace = modelData.workspace;
+    }
+
     setDraft("");
     const userData = await runWorkspaceAction<{ messageId: string }>({
       type: "appendMessage",
-      chatId: activeChat.id,
+      chatId,
       role: "user",
       content,
-      modelId: activeModel.id,
+      modelId: selectedModel.id,
       status: "done",
     });
-    await startAssistantStream(userData.workspace, activeChat.id);
+    nextWorkspace = userData.workspace;
+    await startAssistantStream(nextWorkspace, chatId);
   }
 
   async function handleResend(message: ChatMessage) {
-    if (!activeChat) {
+    const chat = allChats.find((item) => item.id === message.chatId);
+    if (!chat || pendingByChat[chat.id]?.status === "streaming") {
       return;
     }
     const content = editingMessageId === message.id ? editingContent.trim() : message.content.trim();
-    if (!content || pendingByChat[activeChat.id]?.status === "streaming") {
+    if (!content) {
       return;
     }
     setEditingMessageId(null);
@@ -235,12 +294,12 @@ export default function Home() {
       messageId: message.id,
       content,
     });
-    await startAssistantStream(data.workspace, activeChat.id);
+    await startAssistantStream(data.workspace, chat.id);
   }
 
   async function startAssistantStream(nextWorkspace: Workspace, chatId: string) {
     const chat = findChat(nextWorkspace, chatId);
-    const group = chat ? nextWorkspace.groups.find((item) => item.id === chat.groupId) : null;
+    const group = findGroupForChat(nextWorkspace, chatId);
     const model = chat ? nextWorkspace.models.find((item) => item.id === chat.modelId) : null;
     if (!chat || !group || !model) {
       return;
@@ -266,9 +325,9 @@ export default function Home() {
     setPending(chatId, { status: "streaming" });
 
     try {
-      const response = await fetch("/api/chat", {
+      const response = await fetchWithSessionRetry("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getJsonApiHeaders(),
         body: JSON.stringify({
           providerId: model.providerId,
           model: model.model,
@@ -366,14 +425,13 @@ export default function Home() {
       }
       return {
         ...current,
+        defaultGroup: {
+          ...current.defaultGroup,
+          chats: updateChatMessages(current.defaultGroup.chats, messageId, patch),
+        },
         groups: current.groups.map((group) => ({
           ...group,
-          chats: group.chats.map((chat) => ({
-            ...chat,
-            messages: chat.messages.map((message) =>
-              message.id === messageId ? { ...message, ...patch } : message,
-            ),
-          })),
+          chats: updateChatMessages(group.chats, messageId, patch),
         })),
       };
     });
@@ -395,11 +453,37 @@ export default function Home() {
     });
   }
 
+  function handleModelChange(modelId: string) {
+    setLastModelId(modelId);
+    window.localStorage.setItem(LAST_MODEL_KEY, modelId);
+    if (activeChat) {
+      void runWorkspaceAction({ type: "setChatModel", chatId: activeChat.id, modelId });
+    }
+  }
+
+  async function saveDefaultSystemPrompt() {
+    if (!workspace || defaultPromptDraft === workspace.defaultGroup.systemPrompt) {
+      defaultPromptDirty.current = false;
+      return;
+    }
+    const nextPrompt = defaultPromptDraft;
+    defaultPromptDirty.current = false;
+    try {
+      await runWorkspaceAction({
+        type: "updateDefaultSystemPrompt",
+        systemPrompt: nextPrompt,
+      });
+    } catch (error) {
+      defaultPromptDirty.current = true;
+      window.alert(error instanceof Error ? error.message : "Workspace update failed.");
+    }
+  }
+
   async function handleCreateGroup() {
-    const data = await runWorkspaceAction<{ groupId: string; chatId: string }>({ type: "createGroup" });
+    const data = await runWorkspaceAction<{ groupId: string }>({ type: "createGroup" });
     if (data.result) {
-      setActiveGroupId(data.result.groupId);
-      setActiveChatId(data.result.chatId);
+      setView({ type: "group", groupId: data.result.groupId });
+      setSidebarOpen(false);
     }
   }
 
@@ -408,42 +492,30 @@ export default function Home() {
       return;
     }
     group.chats.forEach((chat) => stopChat(chat.id));
-    const data = await runWorkspaceAction<{ groupId: string; chatId: string }>({
-      type: "deleteGroup",
-      groupId: group.id,
-    });
-    const fallback = data.result ?? firstSelection(data.workspace);
-    if (fallback) {
-      setActiveGroupId(fallback.groupId);
-      setActiveChatId(fallback.chatId);
-    }
+    await runWorkspaceAction({ type: "deleteGroup", groupId: group.id });
+    setView({ type: "home" });
   }
 
-  async function handleCreateChat() {
-    if (!activeGroup || !activeChat) {
+  async function handleCreateChat(groupId?: string) {
+    if (!selectedModel) {
       return;
     }
     const data = await runWorkspaceAction<{ chatId: string }>({
       type: "createChat",
-      groupId: activeGroup.id,
-      modelId: activeChat.modelId,
+      groupId,
+      modelId: selectedModel.id,
     });
     if (data.result) {
-      setActiveGroupId(activeGroup.id);
-      setActiveChatId(data.result.chatId);
+      setView({ type: "chat", chatId: data.result.chatId });
+      setSidebarOpen(false);
     }
   }
 
   async function handleDeleteChat(chat: ChatSession) {
     stopChat(chat.id);
-    const data = await runWorkspaceAction<{ groupId: string; chatId: string }>({
-      type: "deleteChat",
-      chatId: chat.id,
-    });
-    const fallback = data.result ?? firstSelection(data.workspace);
-    if (fallback) {
-      setActiveGroupId(fallback.groupId);
-      setActiveChatId(fallback.chatId);
+    await runWorkspaceAction({ type: "deleteChat", chatId: chat.id });
+    if (view.type === "chat" && view.chatId === chat.id) {
+      setView({ type: "home" });
     }
   }
 
@@ -525,7 +597,7 @@ export default function Home() {
     setEditingModelProviderId(model.providerId);
   }
 
-  if (!workspace || !activeGroup || !activeChat || !activeModel) {
+  if (!workspace || !selectedModel) {
     return (
       <main className="loading-shell">
         <RefreshCcw className="spin" size={22} />
@@ -535,22 +607,25 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      {sidebarOpen && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />}
+      {sidebarOpen && (
+        <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
+      )}
 
       <aside className={sidebarOpen ? "sidebar open" : "sidebar"} aria-label="Chat navigation">
         <div className="sidebar-header">
           <div>
-            <p className="eyebrow">Chat Web</p>
-            <h1>Assistant</h1>
+            <button
+              className="brand-button"
+              onClick={() => {
+                setView({ type: "home" });
+                setSidebarOpen(false);
+              }}
+            >
+              <span className="eyebrow">Chat Web</span>
+              <strong>Assistant</strong>
+            </button>
           </div>
-          <button
-            className="icon-button"
-            title="New group"
-            onClick={() => {
-              void handleCreateGroup();
-              setSidebarOpen(false);
-            }}
-          >
+          <button className="icon-button" title="New group" onClick={handleCreateGroup}>
             <Plus size={18} />
           </button>
         </div>
@@ -563,10 +638,9 @@ export default function Home() {
           {workspace.groups.map((group) => (
             <button
               key={group.id}
-              className={group.id === activeGroup.id ? "group-item active" : "group-item"}
+              className={view.type === "group" && view.groupId === group.id ? "group-item active" : "group-item"}
               onClick={() => {
-                setActiveGroupId(group.id);
-                setActiveChatId(group.chats[0]?.id || activeChat.id);
+                setView({ type: "group", groupId: group.id });
                 setSidebarOpen(false);
               }}
             >
@@ -577,33 +651,25 @@ export default function Home() {
         </div>
 
         <div className="chat-list-header">
-          <span>Chats</span>
-          <button
-            className="icon-button subtle"
-            title="New chat"
-            onClick={() => {
-              void handleCreateChat();
-              setSidebarOpen(false);
-            }}
-          >
+          <span>Direct chats</span>
+          <button className="icon-button subtle" title="New chat" onClick={() => void handleCreateChat()}>
             <MessageSquarePlus size={17} />
           </button>
         </div>
 
         <div className="chat-list">
-          {activeGroup.chats.map((chat) => (
-            <div key={chat.id} className={chat.id === activeChat.id ? "chat-row active" : "chat-row"}>
+          {workspace.defaultGroup.chats.map((chat) => (
+            <div key={chat.id} className={view.type === "chat" && view.chatId === chat.id ? "chat-row active" : "chat-row"}>
               <button
                 className="chat-title"
                 onClick={() => {
-                  setActiveGroupId(chat.groupId);
-                  setActiveChatId(chat.id);
+                  setView({ type: "chat", chatId: chat.id });
                   setSidebarOpen(false);
                 }}
               >
                 {chat.title}
               </button>
-              <button className="icon-button danger" title="Delete chat" onClick={() => handleDeleteChat(chat)}>
+              <button className="icon-button danger" title="Delete chat" onClick={() => void handleDeleteChat(chat)}>
                 <Trash2 size={15} />
               </button>
             </div>
@@ -616,111 +682,99 @@ export default function Home() {
           <button className="icon-button mobile-menu-button" title="Navigation" onClick={() => setSidebarOpen(true)}>
             <Menu size={18} />
           </button>
-          <div className="title-editor">
-            <p className="eyebrow">{activeGroup.name}</p>
-            <input
-              value={titleDraft}
-              onChange={(event) => setTitleDraft(event.target.value)}
-              onBlur={() => {
-                if (titleDraft.trim() !== activeChat.title) {
-                  void runWorkspaceAction({
-                    type: "renameChat",
-                    chatId: activeChat.id,
-                    title: titleDraft,
-                  });
-                }
-              }}
-            />
-          </div>
-          <label className="model-select">
-            <span>Model</span>
-            <select
-              value={activeChat.modelId}
-              onChange={(event) =>
-                void runWorkspaceAction({
-                  type: "setChatModel",
-                  chatId: activeChat.id,
-                  modelId: event.target.value,
-                })
-              }
-            >
-              {workspace.models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          {view.type === "chat" && activeChat ? (
+            <div className="title-editor">
+              <p className="eyebrow">{activeChatGroup?.kind === "default" ? "Chats" : activeChatGroup?.name}</p>
+              <input
+                value={titleDraft}
+                onChange={(event) => setTitleDraft(event.target.value)}
+                onBlur={() => {
+                  if (titleDraft.trim() !== activeChat.title) {
+                    void runWorkspaceAction({
+                      type: "renameChat",
+                      chatId: activeChat.id,
+                      title: titleDraft,
+                    });
+                  }
+                }}
+              />
+            </div>
+          ) : (
+            <div className="title-editor">
+              <p className="eyebrow">{view.type === "home" ? "Home" : "Group"}</p>
+              <h2>{view.type === "home" ? "Chats" : activeGroup?.name}</h2>
+            </div>
+          )}
           <button className="icon-button" title="Settings" onClick={() => setSettingsOpen(true)}>
             <Settings2 size={18} />
           </button>
         </header>
 
-        <div className="message-list">
-          {activeChat.messages.length === 0 ? (
-            <div className="empty-state">
-              <Bot size={36} />
-              <h2>Start a conversation</h2>
-              <p>Messages in this chat will use the group system prompt and the selected model.</p>
-            </div>
-          ) : (
-            activeChat.messages.map((message) => (
-              <MessageView
-                key={message.id}
-                message={message}
-                editingMessageId={editingMessageId}
-                editingContent={editingContent}
-                onEditingContentChange={setEditingContent}
-                onEdit={() => {
-                  setEditingMessageId(message.id);
-                  setEditingContent(message.content);
-                }}
-                onCancelEdit={() => {
-                  setEditingMessageId(null);
-                  setEditingContent("");
-                }}
-                onResend={() => void handleResend(message)}
-              />
-            ))
-          )}
-        </div>
+        {view.type === "home" && (
+          <HomeView />
+        )}
+
+        {view.type === "group" && activeGroup && (
+          <GroupView
+            group={activeGroup}
+            onUpdateGroup={(patch) =>
+              runWorkspaceAction({
+                type: "updateGroup",
+                groupId: activeGroup.id,
+                name: patch.name,
+                systemPrompt: patch.systemPrompt,
+              }).then(() => undefined)
+            }
+            onDeleteGroup={() => void handleDeleteGroup(activeGroup)}
+            onCreateChat={() => void handleCreateChat(activeGroup.id)}
+            onOpenChat={(chatId) => setView({ type: "chat", chatId })}
+            onDeleteChat={handleDeleteChat}
+          />
+        )}
+
+        {view.type === "chat" && activeChat && (
+          <ChatView
+            chat={activeChat}
+            editingMessageId={editingMessageId}
+            editingContent={editingContent}
+            onEditingContentChange={setEditingContent}
+            onEditMessage={(message) => {
+              setEditingMessageId(message.id);
+              setEditingContent(message.content);
+            }}
+            onCancelEdit={() => {
+              setEditingMessageId(null);
+              setEditingContent("");
+            }}
+            onResend={(message) => void handleResend(message)}
+          />
+        )}
 
         {activePending?.status === "error" && activePending.error && (
           <div className="error-banner">{activePending.error}</div>
         )}
 
-        <form className="composer" onSubmit={handleSend}>
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder={`Message ${activeModel.name}`}
-            rows={2}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-          />
-          {activePending?.status === "streaming" ? (
-            <button className="send-button stop" type="button" title="Stop" onClick={() => stopChat(activeChat.id)}>
-              <Square size={17} />
-            </button>
-          ) : (
-            <button className="send-button" disabled={!draft.trim()} title="Send">
-              <Send size={19} />
-            </button>
-          )}
-        </form>
+        <Composer
+          draft={draft}
+          models={workspace.models}
+          selectedModelId={selectedModel.id}
+          streaming={activeChat ? activePending?.status === "streaming" : false}
+          onDraftChange={setDraft}
+          onModelChange={handleModelChange}
+          onSubmit={handleSend}
+          onStop={() => activeChat && stopChat(activeChat.id)}
+        />
       </section>
 
-      {settingsOpen && <button className="settings-backdrop" aria-label="Close settings" onClick={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <button className="settings-backdrop" aria-label="Close settings" onClick={() => setSettingsOpen(false)} />
+      )}
 
       <aside className={settingsOpen ? "settings open" : "settings"} aria-label="Settings">
         <div className="settings-title">
           <div className="settings-title-left">
             <Settings2 size={18} />
-            <h2>Workspace</h2>
+            <h2>Settings</h2>
           </div>
           <button className="icon-button" title="Close settings" onClick={() => setSettingsOpen(false)}>
             <X size={17} />
@@ -729,68 +783,32 @@ export default function Home() {
 
         <section className="settings-section">
           <label>
-            Group name
-            <input
-              value={activeGroup.name}
-              onChange={(event) =>
-                void runWorkspaceAction({
-                  type: "updateGroup",
-                  groupId: activeGroup.id,
-                  name: event.target.value,
-                  systemPrompt: activeGroup.systemPrompt,
-                })
-              }
-            />
-          </label>
-          <label>
-            System prompt
+            Default system prompt
             <textarea
-              value={activeGroup.systemPrompt}
-              onChange={(event) =>
-                void runWorkspaceAction({
-                  type: "updateGroup",
-                  groupId: activeGroup.id,
-                  name: activeGroup.name,
-                  systemPrompt: event.target.value,
-                })
-              }
-              rows={8}
+              value={defaultPromptDraft}
+              onChange={(event) => {
+                defaultPromptDirty.current = true;
+                setDefaultPromptDraft(event.target.value);
+              }}
+              onBlur={() => void saveDefaultSystemPrompt()}
+              rows={5}
             />
           </label>
-          <button className="text-button danger-text" onClick={() => void handleDeleteGroup(activeGroup)}>
-            <Trash2 size={15} /> Delete group
-          </button>
         </section>
 
         <section className="settings-section">
           <div className="section-header">
             <h3>Providers</h3>
-            <button
-              className="icon-button"
-              title="Add provider"
-              onClick={() => setProviderFormOpen((open) => !open)}
-            >
+            <button className="icon-button" title="Add provider" onClick={() => setProviderFormOpen((open) => !open)}>
               <Plus size={17} />
             </button>
           </div>
 
           {providerFormOpen && (
             <form className="model-form" onSubmit={handleAddProvider}>
-              <input
-                placeholder="Provider id"
-                value={newProviderId}
-                onChange={(event) => setNewProviderId(event.target.value)}
-              />
-              <input
-                placeholder="Display name"
-                value={newProviderName}
-                onChange={(event) => setNewProviderName(event.target.value)}
-              />
-              <input
-                placeholder="Base URL"
-                value={newProviderBaseURL}
-                onChange={(event) => setNewProviderBaseURL(event.target.value)}
-              />
+              <input placeholder="Provider id" value={newProviderId} onChange={(event) => setNewProviderId(event.target.value)} />
+              <input placeholder="Display name" value={newProviderName} onChange={(event) => setNewProviderName(event.target.value)} />
+              <input placeholder="Base URL" value={newProviderBaseURL} onChange={(event) => setNewProviderBaseURL(event.target.value)} />
               <input
                 type="password"
                 placeholder="API key"
@@ -810,11 +828,7 @@ export default function Home() {
                   <span>{provider.baseURL}</span>
                   <small>{provider.hasApiKey ? "API key saved" : "No API key"}</small>
                 </div>
-                <button
-                  className="icon-button danger"
-                  title="Delete provider"
-                  onClick={() => void handleDeleteProvider(provider)}
-                >
+                <button className="icon-button danger" title="Delete provider" onClick={() => void handleDeleteProvider(provider)}>
                   <Trash2 size={15} />
                 </button>
               </div>
@@ -825,27 +839,15 @@ export default function Home() {
         <section className="settings-section">
           <div className="section-header">
             <h3>Models</h3>
-            <button
-              className="icon-button"
-              title="Add model"
-              onClick={() => setModelFormOpen((open) => !open)}
-            >
+            <button className="icon-button" title="Add model" onClick={() => setModelFormOpen((open) => !open)}>
               <Plus size={17} />
             </button>
           </div>
 
           {modelFormOpen && (
             <form className="model-form" onSubmit={handleAddModel}>
-              <input
-                placeholder="Display name"
-                value={modelName}
-                onChange={(event) => setModelName(event.target.value)}
-              />
-              <input
-                placeholder="Model id"
-                value={modelId}
-                onChange={(event) => setModelId(event.target.value)}
-              />
+              <input placeholder="Display name" value={modelName} onChange={(event) => setModelName(event.target.value)} />
+              <input placeholder="Model id" value={modelId} onChange={(event) => setModelId(event.target.value)} />
               <select value={providerId} onChange={(event) => setProviderId(event.target.value)}>
                 {providers.map((provider) => (
                   <option key={provider.id} value={provider.id}>
@@ -862,7 +864,7 @@ export default function Home() {
               <ModelRow
                 key={model.id}
                 model={model}
-                active={model.id === activeChat.modelId}
+                active={model.id === selectedModel.id}
                 providers={providers}
                 editing={editingModelId === model.id}
                 editingName={editingModelName}
@@ -874,13 +876,7 @@ export default function Home() {
                 onSubmitEdit={handleUpdateModel}
                 onStartEdit={() => startEditingModel(model)}
                 onCancelEdit={() => setEditingModelId(null)}
-                onSelect={() =>
-                  void runWorkspaceAction({
-                    type: "setChatModel",
-                    chatId: activeChat.id,
-                    modelId: model.id,
-                  })
-                }
+                onSelect={() => handleModelChange(model.id)}
                 onDelete={() => void runWorkspaceAction({ type: "deleteModel", modelId: model.id })}
               />
             ))}
@@ -888,6 +884,245 @@ export default function Home() {
         </section>
       </aside>
     </main>
+  );
+}
+
+function HomeView() {
+  return (
+    <div className="home-start">
+      <Bot size={38} />
+      <h2>Start a conversation</h2>
+      <p>Use the composer below to create a direct chat.</p>
+    </div>
+  );
+}
+
+function GroupView({
+  group,
+  onUpdateGroup,
+  onDeleteGroup,
+  onCreateChat,
+  onOpenChat,
+  onDeleteChat,
+}: {
+  group: ChatGroup;
+  onUpdateGroup: (patch: { name: string; systemPrompt: string }) => Promise<void> | void;
+  onDeleteGroup: () => void;
+  onCreateChat: () => void;
+  onOpenChat: (chatId: string) => void;
+  onDeleteChat: (chat: ChatSession) => void;
+}) {
+  const [nameDraft, setNameDraft] = useState(group.name);
+  const [systemPromptDraft, setSystemPromptDraft] = useState(group.systemPrompt);
+  const draftDirty = useRef(false);
+
+  useEffect(() => {
+    if (!draftDirty.current) {
+      setNameDraft(group.name);
+      setSystemPromptDraft(group.systemPrompt);
+    }
+  }, [group.id, group.name, group.systemPrompt]);
+
+  async function saveGroupDraft() {
+    if (nameDraft === group.name && systemPromptDraft === group.systemPrompt) {
+      draftDirty.current = false;
+      return;
+    }
+    const patch = { name: nameDraft, systemPrompt: systemPromptDraft };
+    draftDirty.current = false;
+    try {
+      await onUpdateGroup(patch);
+    } catch (error) {
+      draftDirty.current = true;
+      window.alert(error instanceof Error ? error.message : "Workspace update failed.");
+    }
+  }
+
+  return (
+    <div className="workspace-home">
+      <section className="group-settings-panel">
+        <label>
+          Group name
+          <input
+            value={nameDraft}
+            onChange={(event) => {
+              draftDirty.current = true;
+              setNameDraft(event.target.value);
+            }}
+            onBlur={() => void saveGroupDraft()}
+          />
+        </label>
+        <label>
+          System prompt
+          <textarea
+            value={systemPromptDraft}
+            onChange={(event) => {
+              draftDirty.current = true;
+              setSystemPromptDraft(event.target.value);
+            }}
+            onBlur={() => void saveGroupDraft()}
+            rows={6}
+          />
+        </label>
+        <button className="text-button danger-text" onClick={onDeleteGroup}>
+          <Trash2 size={15} /> Delete group
+        </button>
+      </section>
+
+      <ChatListPanel
+        title="Group chats"
+        chats={group.chats}
+        emptyText="No chats in this group yet."
+        action={
+          <button className="text-button" onClick={onCreateChat}>
+            <MessageSquarePlus size={15} /> New chat
+          </button>
+        }
+        onOpenChat={onOpenChat}
+        onDeleteChat={onDeleteChat}
+      />
+    </div>
+  );
+}
+
+function ChatListPanel({
+  title,
+  chats,
+  emptyText,
+  action,
+  onOpenChat,
+  onDeleteChat,
+}: {
+  title: string;
+  chats: ChatSession[];
+  emptyText: string;
+  action?: ReactNode;
+  onOpenChat: (chatId: string) => void;
+  onDeleteChat: (chat: ChatSession) => void;
+}) {
+  return (
+    <section className="chat-table-section">
+      <div className="section-header">
+        <h3>{title}</h3>
+        {action}
+      </div>
+      {chats.length === 0 ? (
+        <div className="empty-inline">{emptyText}</div>
+      ) : (
+        <div className="compact-chat-list">
+          {chats.map((chat) => (
+            <div key={chat.id} className="compact-chat-row">
+              <button className="compact-chat-title" onClick={() => onOpenChat(chat.id)}>
+                <strong>{chat.title}</strong>
+                <span>{formatDate(chat.updatedAt)}</span>
+              </button>
+              <button className="icon-button danger" title="Delete chat" onClick={() => onDeleteChat(chat)}>
+                <Trash2 size={15} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ChatView({
+  chat,
+  editingMessageId,
+  editingContent,
+  onEditingContentChange,
+  onEditMessage,
+  onCancelEdit,
+  onResend,
+}: {
+  chat: ChatSession;
+  editingMessageId: string | null;
+  editingContent: string;
+  onEditingContentChange: (content: string) => void;
+  onEditMessage: (message: ChatMessage) => void;
+  onCancelEdit: () => void;
+  onResend: (message: ChatMessage) => void;
+}) {
+  return (
+    <div className="message-list">
+      {chat.messages.length === 0 ? (
+        <div className="empty-state">
+          <Bot size={36} />
+          <h2>Start a conversation</h2>
+          <p>Messages in this chat will use the selected model and its container system prompt.</p>
+        </div>
+      ) : (
+        chat.messages.map((message) => (
+          <MessageView
+            key={message.id}
+            message={message}
+            editingMessageId={editingMessageId}
+            editingContent={editingContent}
+            onEditingContentChange={onEditingContentChange}
+            onEdit={() => onEditMessage(message)}
+            onCancelEdit={onCancelEdit}
+            onResend={() => onResend(message)}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+function Composer({
+  draft,
+  models,
+  selectedModelId,
+  streaming,
+  onDraftChange,
+  onModelChange,
+  onSubmit,
+  onStop,
+}: {
+  draft: string;
+  models: ModelConfig[];
+  selectedModelId: string;
+  streaming: boolean;
+  onDraftChange: (draft: string) => void;
+  onModelChange: (modelId: string) => void;
+  onSubmit: (event: FormEvent) => void;
+  onStop: () => void;
+}) {
+  const selectedModel = models.find((model) => model.id === selectedModelId) ?? models[0];
+  return (
+    <form className="composer" onSubmit={onSubmit}>
+      <div className="composer-toolbar">
+        <select value={selectedModelId} onChange={(event) => onModelChange(event.target.value)}>
+          {models.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <textarea
+        value={draft}
+        onChange={(event) => onDraftChange(event.target.value)}
+        placeholder={`Message ${selectedModel?.name ?? "model"}`}
+        rows={2}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }
+        }}
+      />
+      {streaming ? (
+        <button className="send-button stop" type="button" title="Stop" onClick={onStop}>
+          <Square size={17} />
+        </button>
+      ) : (
+        <button className="send-button" disabled={!draft.trim()} title="Send">
+          <Send size={19} />
+        </button>
+      )}
+    </form>
   );
 }
 
@@ -1066,28 +1301,98 @@ const markdownComponents: Components = {
   },
 };
 
-function buildCompletionMessages(group: ChatGroup, chat: ChatSession): CompletionMessage[] {
-  const messages: CompletionMessage[] = [];
-  if (group.systemPrompt.trim()) {
-    messages.push({ role: "system", content: group.systemPrompt.trim() });
-  }
-  for (const message of chat.messages) {
-    if (message.role === "system" || !message.content.trim()) {
-      continue;
-    }
-    messages.push({ role: message.role, content: message.content });
-  }
-  return messages;
-}
-
 function findChat(workspace: Workspace, chatId: string) {
-  return workspace.groups.flatMap((group) => group.chats).find((chat) => chat.id === chatId) ?? null;
+  return [workspace.defaultGroup, ...workspace.groups]
+    .flatMap((group) => group.chats)
+    .find((chat) => chat.id === chatId) ?? null;
 }
 
-function firstSelection(workspace: Workspace) {
-  const group = workspace.groups[0];
-  const chat = group?.chats[0];
-  return group && chat ? { groupId: group.id, chatId: chat.id } : null;
+function getJsonApiHeaders(): HeadersInit {
+  return {
+    ...getApiSessionHeaders(),
+    "Content-Type": "application/json",
+  };
+}
+
+async function fetchWithSessionRetry(input: RequestInfo | URL, init?: RequestInit) {
+  const response = await fetch(input, init);
+  if (!(await isInvalidApiSession(response))) {
+    return response;
+  }
+  await refreshApiSession();
+  return fetch(input, withCurrentApiSessionHeader(init));
+}
+
+async function refreshApiSession() {
+  await fetch("/api/providers", { cache: "no-store" });
+}
+
+async function isInvalidApiSession(response: Response) {
+  if (response.status !== 403) {
+    return false;
+  }
+  const data = (await response.clone().json().catch(() => null)) as { error?: string } | null;
+  return data?.error === "Invalid API session.";
+}
+
+function withCurrentApiSessionHeader(init?: RequestInit): RequestInit | undefined {
+  const token = readBrowserCookie(API_SESSION_COOKIE);
+  if (!token) {
+    return init;
+  }
+  const headers = new Headers(init?.headers);
+  headers.set(API_SESSION_HEADER, token);
+  return { ...init, headers };
+}
+
+function getApiSessionHeaders(): HeadersInit {
+  const token = readBrowserCookie(API_SESSION_COOKIE);
+  return token ? { [API_SESSION_HEADER]: token } : {};
+}
+
+function readBrowserCookie(name: string) {
+  const prefix = `${name}=`;
+  return document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix))
+    ?.slice(prefix.length) ?? "";
+}
+
+function mergeStreamingContent(workspace: Workspace, liveContent: Map<string, string>): Workspace {
+  if (liveContent.size === 0) {
+    return workspace;
+  }
+  return {
+    ...workspace,
+    defaultGroup: mergeStreamingGroup(workspace.defaultGroup, liveContent),
+    groups: workspace.groups.map((group) => mergeStreamingGroup(group, liveContent)),
+  };
+}
+
+function mergeStreamingGroup(group: ChatGroup, liveContent: Map<string, string>): ChatGroup {
+  return {
+    ...group,
+    chats: group.chats.map((chat) => ({
+      ...chat,
+      messages: chat.messages.map((message) =>
+        liveContent.has(message.id) ? { ...message, content: liveContent.get(message.id) ?? "" } : message,
+      ),
+    })),
+  };
+}
+
+function findGroupForChat(workspace: Workspace, chatId: string) {
+  return [workspace.defaultGroup, ...workspace.groups].find((group) =>
+    group.chats.some((chat) => chat.id === chatId),
+  ) ?? null;
+}
+
+function updateChatMessages(chats: ChatSession[], messageId: string, patch: Partial<ChatMessage>) {
+  return chats.map((chat) => ({
+    ...chat,
+    messages: chat.messages.map((message) => (message.id === messageId ? { ...message, ...patch } : message)),
+  }));
 }
 
 function extractText(node: ReactNode): string {
@@ -1106,4 +1411,13 @@ function extractText(node: ReactNode): string {
 
 function copyText(text: string) {
   void navigator.clipboard?.writeText(text);
+}
+
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }

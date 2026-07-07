@@ -156,6 +156,22 @@ h3 {
   background: var(--panel);
 }
 
+.brand-button {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+  text-align: left;
+}
+
+.brand-button strong {
+  font-size: 25px;
+}
+
 .icon-button:hover,
 .send-button:hover {
   border-color: #b8bdb7;
@@ -351,6 +367,109 @@ textarea:focus {
   min-height: 0;
   overflow: auto;
   padding: 22px 0;
+}
+
+.workspace-home {
+  min-height: 0;
+  overflow: auto;
+  width: min(920px, calc(100% - 44px));
+  margin: 0 auto;
+  padding: 24px 0;
+}
+
+.home-start {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.home-start h2 {
+  margin-top: 12px;
+  color: var(--text);
+}
+
+.home-start p {
+  max-width: 360px;
+  line-height: 1.5;
+}
+
+.group-settings-panel,
+.chat-table-section {
+  border-top: 1px solid var(--line);
+  padding: 18px 0;
+}
+
+.group-settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.group-settings-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.compact-chat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.compact-chat-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 6px;
+}
+
+.compact-chat-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 8px;
+  text-align: left;
+}
+
+.compact-chat-title strong,
+.compact-chat-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-chat-title span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.empty-inline {
+  margin-top: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  padding: 18px;
+  text-align: center;
 }
 
 .message {
@@ -588,6 +707,19 @@ textarea:focus {
   background: #fff;
   padding: 10px;
   box-shadow: var(--shadow);
+}
+
+.composer-toolbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-toolbar select {
+  width: auto;
+  min-width: 180px;
+  max-width: min(320px, 100%);
 }
 
 .composer textarea {

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { validateApiMutationRequest } from "../../lib/api-security";
 import { getProvider, getProviderAuthHeader } from "../../lib/providers";
 import { CompletionMessage } from "../../lib/types";
 
@@ -20,6 +21,11 @@ type StreamEvent = {
 };
 
 export async function POST(request: Request) {
+  const guard = validateApiMutationRequest(request, { requireJson: true });
+  if (guard) {
+    return guard;
+  }
+
   let body: ChatRequest;
   try {
     body = (await request.json()) as ChatRequest;

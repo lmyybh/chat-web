@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { validateApiMutationRequest, withApiSession } from "../../lib/api-security";
 import {
   appendMessage,
   createChat,
@@ -11,17 +12,21 @@ import {
   getWorkspace,
   renameChat,
   setChatModel,
+  updateDefaultSystemPrompt,
   updateGroup,
   updateModel,
   updateMessageContent,
   updateMessageStatus,
 } from "../../lib/repository";
 
+export const dynamic = "force-dynamic";
+
 type WorkspaceAction =
   | { type: "createGroup" }
   | { type: "updateGroup"; groupId: string; name: string; systemPrompt: string }
+  | { type: "updateDefaultSystemPrompt"; systemPrompt: string }
   | { type: "deleteGroup"; groupId: string }
-  | { type: "createChat"; groupId: string; modelId?: string }
+  | { type: "createChat"; groupId?: string; modelId?: string }
   | { type: "deleteChat"; chatId: string }
   | { type: "renameChat"; chatId: string; title: string }
   | { type: "setChatModel"; chatId: string; modelId: string }
@@ -46,9 +51,9 @@ type WorkspaceAction =
       error?: string | null;
     };
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    return NextResponse.json({ workspace: getWorkspace() });
+    return withApiSession(NextResponse.json({ workspace: getWorkspace() }), request);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load workspace.";
     return NextResponse.json({ error: message }, { status: 500 });
@@ -56,6 +61,11 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const guard = validateApiMutationRequest(request, { requireJson: true });
+  if (guard) {
+    return guard;
+  }
+
   let action: WorkspaceAction;
   try {
     action = (await request.json()) as WorkspaceAction;
@@ -81,6 +91,8 @@ function runAction(action: WorkspaceAction) {
         name: action.name,
         systemPrompt: action.systemPrompt,
       });
+    case "updateDefaultSystemPrompt":
+      return updateDefaultSystemPrompt(action.systemPrompt);
     case "deleteGroup":
       return deleteGroup(action.groupId);
     case "createChat":

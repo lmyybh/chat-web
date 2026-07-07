@@ -21,6 +21,7 @@ type ModelRow = {
 
 type GroupRow = {
   id: string;
+  kind: "default" | "user";
   name: string;
   system_prompt: string;
   created_at: string;
@@ -102,10 +103,13 @@ export function getWorkspace(): Workspace {
 
   return {
     models,
-    groups: groupRows.map((row) => ({
-      ...mapGroup(row),
-      chats: chatsByGroup.get(row.id) ?? [],
-    })),
+    defaultGroup: buildGroup(
+      groupRows.find((row) => row.kind === "default") ?? groupRows[0],
+      chatsByGroup,
+    ),
+    groups: groupRows
+      .filter((row) => row.kind === "user")
+      .map((row) => buildGroup(row, chatsByGroup)),
   };
 }
 
@@ -114,58 +118,59 @@ export function createGroup() {
   const db = getDb();
   const createdAt = nowIso();
   const groupId = uid("group");
-  const modelId = getFallbackModelId();
-  const chatId = uid("chat");
 
-  db.transaction(() => {
-    db.prepare(
-      "INSERT INTO groups (id, name, system_prompt, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-    ).run(groupId, `Group ${getGroupCount() + 1}`, "You are a helpful assistant.", createdAt, createdAt);
-    db.prepare(
-      "INSERT INTO chats (id, group_id, title, title_source, model_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(chatId, groupId, "New chat", "auto", modelId, createdAt, createdAt);
-  })();
+  db.prepare(
+    "INSERT INTO groups (id, kind, name, system_prompt, created_at, updated_at) VALUES (?, 'user', ?, ?, ?, ?)",
+  ).run(groupId, `Group ${getUserGroupCount() + 1}`, "You are a helpful assistant.", createdAt, createdAt);
 
-  return { groupId, chatId };
+  return { groupId };
 }
 
 export function updateGroup(groupId: string, patch: { name: string; systemPrompt: string }) {
   ensureSeedData();
+  const group = getGroupRow(groupId);
+  if (!group) {
+    throw new Error("Group not found.");
+  }
+  if (group.kind === "default") {
+    getDb()
+      .prepare("UPDATE groups SET system_prompt = ?, updated_at = ? WHERE id = ?")
+      .run(patch.systemPrompt, nowIso(), groupId);
+    return;
+  }
   const name = patch.name.trim() || "Untitled group";
   getDb()
     .prepare("UPDATE groups SET name = ?, system_prompt = ?, updated_at = ? WHERE id = ?")
     .run(name, patch.systemPrompt, nowIso(), groupId);
 }
 
+export function updateDefaultSystemPrompt(systemPrompt: string) {
+  ensureSeedData();
+  const defaultGroup = getDefaultGroupRow();
+  getDb()
+    .prepare("UPDATE groups SET system_prompt = ?, updated_at = ? WHERE id = ?")
+    .run(systemPrompt, nowIso(), defaultGroup.id);
+}
+
 export function deleteGroup(groupId: string) {
   ensureSeedData();
   const db = getDb();
-  const deleted = db.transaction(() => {
-    const group = getGroupRow(groupId);
-    if (!group) {
-      return null;
-    }
-    db.prepare("DELETE FROM groups WHERE id = ?").run(groupId);
-    if (getGroupCount() === 0) {
-      const fallbackModelId = getFallbackModelId(false);
-      if (!fallbackModelId) {
-        throw new Error("No model is configured.");
-      }
-      const created = createDefaultGroupAndChat(fallbackModelId);
-      return created;
-    }
-    const fallback = db
-      .prepare("SELECT id, group_id FROM chats ORDER BY updated_at DESC LIMIT 1")
-      .get<{ id: string; group_id: string }>();
-    return fallback ? { groupId: fallback.group_id, chatId: fallback.id } : null;
-  })();
-  return deleted;
+  const group = getGroupRow(groupId);
+  if (!group) {
+    return null;
+  }
+  if (group.kind === "default") {
+    throw new Error("The default chat container cannot be deleted.");
+  }
+  db.prepare("DELETE FROM groups WHERE id = ?").run(groupId);
+  return { groupId };
 }
 
-export function createChat(groupId: string, modelId?: string) {
+export function createChat(groupId?: string, modelId?: string) {
   ensureSeedData();
   const db = getDb();
-  const group = getGroupRow(groupId);
+  const targetGroupId = groupId || getDefaultGroupRow().id;
+  const group = getGroupRow(targetGroupId);
   if (!group) {
     throw new Error("Group not found.");
   }
@@ -174,7 +179,7 @@ export function createChat(groupId: string, modelId?: string) {
   const selectedModelId = modelId && getModelRow(modelId) ? modelId : getFallbackModelId();
   db.prepare(
     "INSERT INTO chats (id, group_id, title, title_source, model_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(chatId, groupId, "New chat", "auto", selectedModelId, createdAt, createdAt);
+  ).run(chatId, targetGroupId, "New chat", "auto", selectedModelId, createdAt, createdAt);
   return { chatId };
 }
 
@@ -187,20 +192,7 @@ export function deleteChat(chatId: string) {
       return null;
     }
     db.prepare("DELETE FROM chats WHERE id = ?").run(chatId);
-
-    const remainingInGroup = db
-      .prepare("SELECT id FROM chats WHERE group_id = ? ORDER BY updated_at DESC LIMIT 1")
-      .get<{ id: string }>(chat.group_id);
-    if (remainingInGroup) {
-      return { groupId: chat.group_id, chatId: remainingInGroup.id };
-    }
-
-    const createdAt = nowIso();
-    const fallbackChatId = uid("chat");
-    db.prepare(
-      "INSERT INTO chats (id, group_id, title, title_source, model_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(fallbackChatId, chat.group_id, "New chat", "auto", chat.model_id, createdAt, createdAt);
-    return { groupId: chat.group_id, chatId: fallbackChatId };
+    return { groupId: chat.group_id, chatId };
   })();
 }
 
@@ -285,16 +277,16 @@ export function appendMessage(input: NewMessageInput) {
   const createdAt = nowIso();
   const messageId = uid("msg");
   const model = input.modelId ? getModelRow(input.modelId) : getModelRow(chat.model_id);
-  const position =
-    (db
-      .prepare("SELECT MAX(position) AS max_position FROM messages WHERE chat_id = ?")
-      .get<{ max_position: number | null }>(input.chatId)?.max_position ?? -1) + 1;
 
   db.transaction(() => {
     db.prepare(
       `INSERT INTO messages
         (id, chat_id, role, content, model_id, model_name_snapshot, status, error, position, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (
+         ?, ?, ?, ?, ?, ?, ?, ?,
+         COALESCE((SELECT MAX(position) + 1 FROM messages WHERE chat_id = ?), 0),
+         ?, ?
+       )`,
     ).run(
       messageId,
       input.chatId,
@@ -304,7 +296,7 @@ export function appendMessage(input: NewMessageInput) {
       model?.name ?? null,
       input.status ?? "done",
       input.error ?? null,
-      position,
+      input.chatId,
       createdAt,
       createdAt,
     );
@@ -366,7 +358,8 @@ export function updateMessageStatus(messageId: string, status: MessageStatus, er
 export function ensureSeedData() {
   const db = getDb();
   const modelCount = db.prepare("SELECT COUNT(*) AS count FROM models").get<{ count: number }>()?.count ?? 0;
-  if (modelCount > 0 && getGroupCount() > 0) {
+  const defaultGroup = db.prepare("SELECT id FROM groups WHERE kind = 'default' LIMIT 1").get<{ id: string }>();
+  if (modelCount > 0 && defaultGroup) {
     return;
   }
 
@@ -380,24 +373,20 @@ export function ensureSeedData() {
         "INSERT INTO models (id, name, model, provider_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       ).run(modelId, "GPT-4o mini", "gpt-4o-mini", provider.id, createdAt, createdAt);
     }
-    if (getGroupCount() === 0) {
-      createDefaultGroupAndChat(modelId);
+    if (!db.prepare("SELECT id FROM groups WHERE kind = 'default' LIMIT 1").get<{ id: string }>()) {
+      createDefaultGroup();
     }
   })();
 }
 
-function createDefaultGroupAndChat(modelId: string) {
+function createDefaultGroup() {
   const db = getDb();
   const createdAt = nowIso();
   const groupId = uid("group");
-  const chatId = uid("chat");
   db.prepare(
-    "INSERT INTO groups (id, name, system_prompt, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-  ).run(groupId, "Default", "You are a helpful assistant.", createdAt, createdAt);
-  db.prepare(
-    "INSERT INTO chats (id, group_id, title, title_source, model_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(chatId, groupId, "New chat", "auto", modelId, createdAt, createdAt);
-  return { groupId, chatId };
+    "INSERT INTO groups (id, kind, name, system_prompt, created_at, updated_at) VALUES (?, 'default', ?, ?, ?, ?)",
+  ).run(groupId, "Default", "", createdAt, createdAt);
+  return { groupId };
 }
 
 function getFallbackModelId(ensure = true) {
@@ -414,12 +403,24 @@ function getFallbackModelId(ensure = true) {
   return model.id;
 }
 
-function getGroupCount() {
-  return getDb().prepare("SELECT COUNT(*) AS count FROM groups").get<{ count: number }>()?.count ?? 0;
+function getUserGroupCount() {
+  return getDb()
+    .prepare("SELECT COUNT(*) AS count FROM groups WHERE kind = 'user'")
+    .get<{ count: number }>()?.count ?? 0;
 }
 
 function getGroupRow(groupId: string) {
   return getDb().prepare("SELECT * FROM groups WHERE id = ?").get<GroupRow>(groupId);
+}
+
+function getDefaultGroupRow() {
+  const group = getDb()
+    .prepare("SELECT * FROM groups WHERE kind = 'default' ORDER BY created_at ASC LIMIT 1")
+    .get<GroupRow>();
+  if (!group) {
+    throw new Error("Default chat container is missing.");
+  }
+  return group;
 }
 
 function getChatRow(chatId: string) {
@@ -470,9 +471,17 @@ function mapModel(row: ModelRow): ModelConfig {
   };
 }
 
+function buildGroup(row: GroupRow, chatsByGroup: Map<string, ChatSession[]>): ChatGroup {
+  return {
+    ...mapGroup(row),
+    chats: chatsByGroup.get(row.id) ?? [],
+  };
+}
+
 function mapGroup(row: GroupRow): Omit<ChatGroup, "chats"> {
   return {
     id: row.id,
+    kind: row.kind,
     name: row.name,
     systemPrompt: row.system_prompt,
     createdAt: row.created_at,

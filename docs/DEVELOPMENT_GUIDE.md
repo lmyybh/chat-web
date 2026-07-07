@@ -32,30 +32,29 @@ Non-goals for v1:
   - `data/*.sqlite`
   - `data/*.sqlite-wal`
   - `data/*.sqlite-shm`
-- Use localStorage only for non-critical UI preferences such as last active group/chat.
+- Use localStorage only for non-critical UI preferences such as the last selected model.
 - Keep provider configuration server-side. The browser must never send arbitrary `baseURL` to `/api/chat`.
 
 ## Provider Model
 
-Support multiple OpenAI-compatible providers. Providers are configured server-side and exposed to the UI as an allowlist.
+Support multiple OpenAI-compatible providers. Providers are stored in SQLite, managed from the global settings drawer, and exposed to the UI without API keys.
 
 Provider fields:
 
 - `id`
 - `name`
 - `baseURL`
-- `apiKeyEnv`
+- `apiKey`
+- `apiKeyEnv` for optional initial environment-based seed data
 
 Rules:
 
-- `/api/providers` returns only public provider fields: `id` and `name`.
+- `/api/providers` returns only public provider fields: `id`, `name`, `baseURL`, and `hasApiKey`.
+- `/api/providers` supports adding and deleting providers.
 - `/api/chat` accepts `providerId`, `model`, and `messages`.
 - `/api/chat` looks up `providerId` server-side to find `baseURL`.
-- `apiKeyEnv` controls Authorization:
-  - Missing `apiKeyEnv`: use `OPENAI_API_KEY`.
-  - Non-empty `apiKeyEnv`: read that environment variable.
-  - Empty string: do not send `Authorization`, for local unauthenticated providers.
-- If a provider requires a key and the env var is missing, return a clear error.
+- Provider API keys are stored server-side in SQLite and are never returned to the browser.
+- Empty provider API key means do not send `Authorization`, for local unauthenticated providers.
 
 Example `.env.local`:
 
@@ -68,12 +67,12 @@ OPENAI_COMPATIBLE_PROVIDERS='[
 ]'
 ```
 
-If `OPENAI_COMPATIBLE_PROVIDERS` is not set, create a default provider:
+If `OPENAI_COMPATIBLE_PROVIDERS` is not set in a fresh database, create a default provider:
 
 - `id`: `openai`
 - `name`: `OpenAI`
 - `baseURL`: `OPENAI_BASE_URL || https://api.openai.com/v1`
-- `apiKeyEnv`: `OPENAI_API_KEY`
+- `apiKey`: `OPENAI_API_KEY` when present
 
 ## Data Model
 
@@ -88,6 +87,7 @@ Recommended SQLite tables:
   - `updated_at`
 - `groups`
   - `id`
+  - `kind` as `"default" | "user"`
   - `name`
   - `system_prompt`
   - `created_at`
@@ -136,6 +136,7 @@ API routes should call repository functions instead of writing SQL inline.
 System prompt:
 
 - `groups.system_prompt` is the only system prompt source for all chats in that group.
+- The internal default group stores the default system prompt for Home/Chats.
 - Chats do not store system prompt snapshots.
 - Changing a group system prompt affects future sends and resends for every chat in the group.
 - Historical messages are not rewritten.
@@ -143,8 +144,8 @@ System prompt:
 Models:
 
 - `chats.model_id` is the current model for that chat.
-- Switching models affects only future sends/resends in the current chat.
-- New chats inherit the active chat's model.
+- Switching models happens in the composer toolbar and affects future sends/resends in the current chat.
+- New chats use the globally remembered last selected model.
 - Messages store `model_name_snapshot` so history remains accurate after model deletion.
 - Deleting a model moves affected chats to a fallback model.
 
@@ -166,9 +167,10 @@ Chat titles:
 Deletion:
 
 - Deleting a chat always removes that chat.
-- If the group would become empty, automatically create a blank chat that inherits the deleted chat's model.
+- Deleting a chat does not create a blank replacement.
 - Deleting a group requires confirmation and deletes all chats/messages in that group.
-- At least one group must always exist. If the last group is deleted, create a default group and blank chat.
+- The internal default group always exists but is not shown in the group list.
+- User groups are optional; deleting the last user group is allowed.
 - Deleting a pending chat or group must abort related requests and ignore late stream deltas.
 
 ## Streaming Chat
@@ -204,18 +206,21 @@ Use a ChatGPT-like layout:
   - New group button.
   - Settings button.
   - Group list.
-  - Current group chat list.
-  - New chat button.
+  - Home/Chats entry.
+  - Default-group chat list.
+  - New default chat button.
 - Main conversation:
-  - Header with current group, editable chat title, model selector, and settings button.
-  - Message list.
+  - Home/Chats view with default chat list and composer.
+  - Group home view with group name, group system prompt, delete group, group chat list, and composer.
+  - Chat view with editable chat title and message list.
   - Composer at the bottom.
-- Settings drawer:
-  - Edit group name.
-  - Edit group system prompt.
+- Composer:
+  - Model selector in the composer toolbar.
+- Global settings drawer:
+  - Edit default system prompt for Home/Chats.
+  - Manage providers.
   - Manage models.
   - Select provider when adding/editing a model.
-  - Delete group with confirmation.
 
 Mobile:
 

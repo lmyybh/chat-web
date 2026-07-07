@@ -2,7 +2,9 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { API_SESSION_COOKIE, API_SESSION_HEADER } from "../../lib/api-session";
 import { resetDbConnectionForTests } from "../../lib/db";
+import { GET as getProviders } from "../providers/route";
 import { POST } from "./route";
 
 let tempDir = "";
@@ -24,10 +26,12 @@ describe("/api/chat", () => {
   it("returns a clear error when provider API key is missing", async () => {
     vi.stubEnv("OPENAI_API_KEY", "");
     vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
 
     const response = await POST(
       new Request("http://localhost/api/chat", {
         method: "POST",
+        headers,
         body: JSON.stringify({
           providerId: "openai",
           model: "gpt-4o-mini",
@@ -45,10 +49,12 @@ describe("/api/chat", () => {
   it("rejects unknown provider ids", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
 
     const response = await POST(
       new Request("http://localhost/api/chat", {
         method: "POST",
+        headers,
         body: JSON.stringify({
           providerId: "unknown",
           model: "gpt-4o-mini",
@@ -64,10 +70,12 @@ describe("/api/chat", () => {
   it("validates request body", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
 
     const response = await POST(
       new Request("http://localhost/api/chat", {
         method: "POST",
+        headers,
         body: JSON.stringify({ providerId: "openai", model: "", messages: [] }),
       }),
     );
@@ -78,6 +86,7 @@ describe("/api/chat", () => {
   it("streams provider deltas without accepting arbitrary base URLs", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
     const encoder = new TextEncoder();
     const providerStream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -95,6 +104,7 @@ describe("/api/chat", () => {
     const response = await POST(
       new Request("http://localhost/api/chat", {
         method: "POST",
+        headers,
         body: JSON.stringify({
           providerId: "openai",
           model: "gpt-4o-mini",
@@ -119,6 +129,7 @@ describe("/api/chat", () => {
   it("forwards provider stream errors", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
     const encoder = new TextEncoder();
     const providerStream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -131,6 +142,7 @@ describe("/api/chat", () => {
     const response = await POST(
       new Request("http://localhost/api/chat", {
         method: "POST",
+        headers,
         body: JSON.stringify({
           providerId: "openai",
           model: "gpt-4o-mini",
@@ -141,4 +153,38 @@ describe("/api/chat", () => {
 
     expect(await response.text()).toContain('event: error\ndata: {"error":"stream failed"}');
   });
+
+  it("rejects requests without a valid API session", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          providerId: "openai",
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(403);
+  });
 });
+
+async function createSessionJsonHeaders() {
+  const response = await getProviders(new Request("http://localhost/api/providers"));
+  const cookie = response.headers.get("set-cookie") || "";
+  const match = new RegExp(`${API_SESSION_COOKIE}=([^;]+)`).exec(cookie);
+  if (!match) {
+    throw new Error("Missing API session cookie.");
+  }
+  const token = match[1];
+  return {
+    Cookie: `${API_SESSION_COOKIE}=${token}`,
+    [API_SESSION_HEADER]: token,
+    "Content-Type": "application/json",
+  };
+}

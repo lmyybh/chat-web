@@ -52,6 +52,7 @@ export type ChatSession = {
 
 export type ChatGroup = {
   id: string;
+  kind: "default" | "user";
   name: string;
   systemPrompt: string;
   chats: ChatSession[];
@@ -61,6 +62,7 @@ export type ChatGroup = {
 
 export type Workspace = {
   models: ModelConfig[];
+  defaultGroup: ChatGroup;
   groups: ChatGroup[];
 };
 

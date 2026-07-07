@@ -29,11 +29,11 @@ export function getProviders(): ProviderConfig[] {
 }
 
 export function getPublicProviders(): PublicProvider[] {
-  return getProviders().map(({ id, name, baseURL, apiKey }) => ({
+  return getProviders().map(({ id, name, baseURL, apiKey, apiKeyEnv }) => ({
     id,
     name,
     baseURL,
-    hasApiKey: Boolean(apiKey),
+    hasApiKey: Boolean(apiKey || (apiKeyEnv && process.env[apiKeyEnv])),
   }));
 }
 
@@ -90,6 +90,7 @@ export function ensureProviderSeedData() {
   const db = getDb();
   const count = db.prepare("SELECT COUNT(*) AS count FROM providers").get<{ count: number }>()?.count ?? 0;
   if (count > 0) {
+    normalizeEnvBackedProviderKeys();
     return;
   }
 
@@ -121,8 +122,8 @@ function getInitialProviders(): ProviderConfig[] {
         id: "openai",
         name: "OpenAI",
         baseURL: normalizeBaseUrl(process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL),
-        apiKey: process.env.OPENAI_API_KEY || null,
-        apiKeyEnv: process.env.OPENAI_API_KEY ? null : "OPENAI_API_KEY",
+        apiKey: null,
+        apiKeyEnv: "OPENAI_API_KEY",
       },
     ];
   }
@@ -157,14 +158,25 @@ function parseEnvProvider(item: unknown, index: number): ProviderConfig {
     throw new Error(`Provider ${provider.id} has invalid apiKeyEnv.`);
   }
   const apiKeyEnv = provider.apiKeyEnv ?? "OPENAI_API_KEY";
-  const apiKey = typeof apiKeyEnv === "string" && apiKeyEnv ? process.env[apiKeyEnv] || null : null;
   return {
     id: provider.id.trim(),
     name: provider.name.trim(),
     baseURL: normalizeBaseUrl(provider.baseURL),
-    apiKey,
-    apiKeyEnv: apiKey ? null : apiKeyEnv,
+    apiKey: null,
+    apiKeyEnv,
   };
+}
+
+function normalizeEnvBackedProviderKeys() {
+  const openAiKey = process.env.OPENAI_API_KEY;
+  if (!openAiKey) {
+    return;
+  }
+  getDb()
+    .prepare(
+      "UPDATE providers SET api_key = NULL, api_key_env = 'OPENAI_API_KEY', updated_at = ? WHERE id = 'openai' AND api_key = ? AND api_key_env IS NULL",
+    )
+    .run(nowIso(), openAiKey);
 }
 
 function normalizeProviderInput(input: NewProviderInput) {
