@@ -30,6 +30,9 @@ export type ChatMessage = {
   chatId: string;
   role: ChatRole;
   content: string;
+  reasoningContent: string | null;
+  reasoningStartedAt: string | null;
+  reasoningEndedAt: string | null;
   modelId: string | null;
   modelNameSnapshot: string | null;
   status: MessageStatus;

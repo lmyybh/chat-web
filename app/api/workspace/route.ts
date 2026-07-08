@@ -16,6 +16,7 @@ import {
   updateGroup,
   updateModel,
   updateMessageContent,
+  updateMessageReasoning,
   updateMessageStatus,
 } from "../../lib/repository";
 
@@ -38,12 +39,22 @@ type WorkspaceAction =
       chatId: string;
       role: "system" | "user" | "assistant";
       content: string;
+      reasoningContent?: string | null;
+      reasoningStartedAt?: string | null;
+      reasoningEndedAt?: string | null;
       modelId?: string | null;
       status?: "done" | "streaming" | "error" | "stopped";
       error?: string | null;
     }
   | { type: "editUserMessageAndTruncate"; messageId: string; content: string }
   | { type: "updateMessageContent"; messageId: string; content: string }
+  | {
+      type: "updateMessageReasoning";
+      messageId: string;
+      reasoningContent: string | null;
+      reasoningStartedAt: string | null;
+      reasoningEndedAt: string | null;
+    }
   | {
       type: "updateMessageStatus";
       messageId: string;
@@ -122,6 +133,9 @@ function runAction(action: WorkspaceAction) {
         chatId: action.chatId,
         role: action.role,
         content: action.content,
+        reasoningContent: action.reasoningContent,
+        reasoningStartedAt: action.reasoningStartedAt,
+        reasoningEndedAt: action.reasoningEndedAt,
         modelId: action.modelId,
         status: action.status,
         error: action.error,
@@ -130,6 +144,13 @@ function runAction(action: WorkspaceAction) {
       return editUserMessageAndTruncate(action.messageId, action.content);
     case "updateMessageContent":
       return updateMessageContent(action.messageId, action.content);
+    case "updateMessageReasoning":
+      return updateMessageReasoning(
+        action.messageId,
+        action.reasoningContent,
+        action.reasoningStartedAt,
+        action.reasoningEndedAt,
+      );
     case "updateMessageStatus":
       return updateMessageStatus(action.messageId, action.status, action.error);
     default:

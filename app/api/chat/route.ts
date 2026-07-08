@@ -7,6 +7,7 @@ type ChatRequest = {
   providerId: string;
   model: string;
   messages: CompletionMessage[];
+  enableThinking?: boolean;
 };
 
 type ProviderError = {
@@ -58,11 +59,7 @@ export async function POST(request: Request) {
         ...authHeader,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: body.model,
-        messages: body.messages,
-        stream: true,
-      }),
+      body: JSON.stringify(buildProviderRequestBody(body)),
       signal: request.signal,
     });
 
@@ -102,6 +99,9 @@ function validateBody(body: ChatRequest) {
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return "Field messages must be a non-empty array.";
   }
+  if (body.enableThinking !== undefined && typeof body.enableThinking !== "boolean") {
+    return "Field enableThinking must be a boolean.";
+  }
   const invalid = body.messages.some(
     (message) =>
       !message ||
@@ -112,6 +112,21 @@ function validateBody(body: ChatRequest) {
     return "Messages must include role and content.";
   }
   return null;
+}
+
+function buildProviderRequestBody(body: ChatRequest) {
+  return {
+    model: body.model,
+    messages: body.messages,
+    stream: true,
+    ...(body.enableThinking
+      ? {
+          chat_template_kwargs: { enable_thinking: true },
+          separate_reasoning: true,
+          stream_reasoning: true,
+        }
+      : {}),
+  };
 }
 
 function streamProviderDeltas(body: ReadableStream<Uint8Array>) {
@@ -151,9 +166,9 @@ function streamProviderDeltas(body: ReadableStream<Uint8Array>) {
               forwardStreamError(controller, encoder, error);
               continue;
             }
-            const delta = readDelta(data);
-            if (delta) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`));
+            const { delta, reasoningDelta } = readDelta(data);
+            if (delta || reasoningDelta) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta, reasoningDelta })}\n\n`));
             }
           }
         }
@@ -195,13 +210,17 @@ function readDelta(payload: string) {
   try {
     const data = JSON.parse(payload) as {
       choices?: Array<{
-        delta?: { content?: string };
-        message?: { content?: string };
+        delta?: { content?: string; reasoning_content?: string };
+        message?: { content?: string; reasoning_content?: string };
       }>;
     };
-    return data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.message?.content ?? "";
+    const choice = data.choices?.[0];
+    return {
+      delta: choice?.delta?.content ?? choice?.message?.content ?? "",
+      reasoningDelta: choice?.delta?.reasoning_content ?? choice?.message?.reasoning_content ?? "",
+    };
   } catch {
-    return "";
+    return { delta: "", reasoningDelta: "" };
   }
 }
 

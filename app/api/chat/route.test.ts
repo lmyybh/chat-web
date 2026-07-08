@@ -122,8 +122,98 @@ describe("/api/chat", () => {
       }),
     );
     const text = await response.text();
-    expect(text).toContain('data: {"delta":"hel"}');
-    expect(text).toContain('data: {"delta":"lo"}');
+    expect(text).toContain('data: {"delta":"hel","reasoningDelta":""}');
+    expect(text).toContain('data: {"delta":"lo","reasoningDelta":""}');
+  });
+
+  it("streams provider reasoning deltas separately", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
+    const encoder = new TextEncoder();
+    const providerStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n\ndata: {"choices":[{"delta":{"content":"answer"}}]}\n\ndata: [DONE]\n\n',
+          ),
+        );
+        controller.close();
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(providerStream, { status: 200 })));
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "openai",
+          model: "qwen3",
+          messages: [{ role: "user", content: "hello" }],
+          enableThinking: true,
+        }),
+      }),
+    );
+
+    const text = await response.text();
+    expect(text).toContain('data: {"delta":"","reasoningDelta":"think"}');
+    expect(text).toContain('data: {"delta":"answer","reasoningDelta":""}');
+  });
+
+  it("forwards enable_thinking only when deep thinking is enabled", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(providerDoneStream(), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "openai",
+          model: "qwen3",
+          messages: [{ role: "user", content: "hello" }],
+          enableThinking: true,
+        }),
+      }),
+    );
+
+    const providerInit = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(providerInit.body))).toMatchObject({
+      chat_template_kwargs: { enable_thinking: true },
+      separate_reasoning: true,
+      stream_reasoning: true,
+    });
+  });
+
+  it("does not forward chat_template_kwargs by default", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(providerDoneStream(), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "openai",
+          model: "qwen3",
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      }),
+    );
+
+    const providerInit = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(providerInit.body))).not.toHaveProperty("chat_template_kwargs");
   });
 
   it("forwards provider stream errors", async () => {
@@ -173,6 +263,16 @@ describe("/api/chat", () => {
     expect(response.status).toBe(403);
   });
 });
+
+function providerDoneStream() {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+}
 
 async function createSessionJsonHeaders() {
   const response = await getProviders(new Request("http://localhost/api/providers"));

@@ -16,6 +16,7 @@ import {
   getWorkspace,
   renameChat,
   updateDefaultSystemPrompt,
+  updateMessageReasoning,
   updateModel,
 } from "./repository";
 
@@ -99,13 +100,13 @@ describe("repository", () => {
     db.prepare("DROP INDEX IF EXISTS idx_messages_chat_position").run();
     db.prepare(
       `INSERT INTO messages
-        (id, chat_id, role, content, model_id, model_name_snapshot, status, error, position, created_at, updated_at)
-       VALUES (?, ?, 'user', ?, ?, ?, 'done', NULL, 0, ?, ?)`,
+        (id, chat_id, role, content, reasoning_content, reasoning_started_at, reasoning_ended_at, model_id, model_name_snapshot, status, error, position, created_at, updated_at)
+       VALUES (?, ?, 'user', ?, NULL, NULL, NULL, ?, ?, 'done', NULL, 0, ?, ?)`,
     ).run("legacy_msg_1", chatId, "one", workspace.models[0].id, workspace.models[0].name, createdAt, createdAt);
     db.prepare(
       `INSERT INTO messages
-        (id, chat_id, role, content, model_id, model_name_snapshot, status, error, position, created_at, updated_at)
-       VALUES (?, ?, 'assistant', ?, ?, ?, 'done', NULL, 0, ?, ?)`,
+        (id, chat_id, role, content, reasoning_content, reasoning_started_at, reasoning_ended_at, model_id, model_name_snapshot, status, error, position, created_at, updated_at)
+       VALUES (?, ?, 'assistant', ?, NULL, NULL, NULL, ?, ?, 'done', NULL, 0, ?, ?)`,
     ).run("legacy_msg_2", chatId, "two", workspace.models[0].id, workspace.models[0].name, createdAt, createdAt);
 
     resetDbConnectionForTests();
@@ -130,6 +131,30 @@ describe("repository", () => {
 
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ role: "user", content: "edited" });
+  });
+
+  it("persists assistant reasoning content", () => {
+    const chatId = createChat().chatId;
+    const startedAt = "2026-01-01T00:00:00.000Z";
+    const endedAt = "2026-01-01T00:00:03.000Z";
+    const assistant = appendMessage({
+      chatId,
+      role: "assistant",
+      content: "",
+      reasoningContent: "draft thought",
+      reasoningStartedAt: startedAt,
+      reasoningEndedAt: null,
+      status: "streaming",
+    });
+
+    updateMessageReasoning(assistant.messageId, "final thought", startedAt, endedAt);
+    const message = getWorkspace().defaultGroup.chats[0].messages[0];
+
+    expect(message).toMatchObject({
+      reasoningContent: "final thought",
+      reasoningStartedAt: startedAt,
+      reasoningEndedAt: endedAt,
+    });
   });
 
   it("manual chat title prevents automatic title overwrite", () => {

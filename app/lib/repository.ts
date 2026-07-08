@@ -43,6 +43,9 @@ type MessageRow = {
   chat_id: string;
   role: ChatRole;
   content: string;
+  reasoning_content: string | null;
+  reasoning_started_at: string | null;
+  reasoning_ended_at: string | null;
   model_id: string | null;
   model_name_snapshot: string | null;
   status: MessageStatus;
@@ -62,6 +65,9 @@ export type NewMessageInput = {
   chatId: string;
   role: ChatRole;
   content: string;
+  reasoningContent?: string | null;
+  reasoningStartedAt?: string | null;
+  reasoningEndedAt?: string | null;
   modelId?: string | null;
   status?: MessageStatus;
   error?: string | null;
@@ -281,9 +287,9 @@ export function appendMessage(input: NewMessageInput) {
   db.transaction(() => {
     db.prepare(
       `INSERT INTO messages
-        (id, chat_id, role, content, model_id, model_name_snapshot, status, error, position, created_at, updated_at)
+        (id, chat_id, role, content, reasoning_content, reasoning_started_at, reasoning_ended_at, model_id, model_name_snapshot, status, error, position, created_at, updated_at)
        VALUES (
-         ?, ?, ?, ?, ?, ?, ?, ?,
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
          COALESCE((SELECT MAX(position) + 1 FROM messages WHERE chat_id = ?), 0),
          ?, ?
        )`,
@@ -292,6 +298,9 @@ export function appendMessage(input: NewMessageInput) {
       input.chatId,
       input.role,
       input.content,
+      input.reasoningContent ?? null,
+      input.reasoningStartedAt ?? null,
+      input.reasoningEndedAt ?? null,
       model?.id ?? null,
       model?.name ?? null,
       input.status ?? "done",
@@ -338,6 +347,24 @@ export function updateMessageContent(messageId: string, content: string) {
   getDb()
     .prepare("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?")
     .run(content, nowIso(), messageId);
+  const message = getMessageRow(messageId);
+  if (message) {
+    touchChat(message.chat_id);
+  }
+}
+
+export function updateMessageReasoning(
+  messageId: string,
+  reasoningContent: string | null,
+  reasoningStartedAt: string | null,
+  reasoningEndedAt: string | null = null,
+) {
+  ensureSeedData();
+  getDb()
+    .prepare(
+      "UPDATE messages SET reasoning_content = ?, reasoning_started_at = ?, reasoning_ended_at = ?, updated_at = ? WHERE id = ?",
+    )
+    .run(reasoningContent, reasoningStartedAt, reasoningEndedAt, nowIso(), messageId);
   const message = getMessageRow(messageId);
   if (message) {
     touchChat(message.chat_id);
@@ -507,6 +534,9 @@ function mapMessage(row: MessageRow): ChatMessage {
     chatId: row.chat_id,
     role: row.role,
     content: row.content,
+    reasoningContent: row.reasoning_content,
+    reasoningStartedAt: row.reasoning_started_at,
+    reasoningEndedAt: row.reasoning_ended_at,
     modelId: row.model_id,
     modelNameSnapshot: row.model_name_snapshot,
     status: row.status,

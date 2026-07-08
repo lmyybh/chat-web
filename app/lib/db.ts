@@ -79,6 +79,9 @@ function migrate(db: Database) {
       chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
       role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant')),
       content TEXT NOT NULL,
+      reasoning_content TEXT,
+      reasoning_started_at TEXT,
+      reasoning_ended_at TEXT,
       model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
       model_name_snapshot TEXT,
       status TEXT NOT NULL CHECK (status IN ('done', 'streaming', 'error', 'stopped')),
@@ -91,8 +94,22 @@ function migrate(db: Database) {
     CREATE INDEX IF NOT EXISTS idx_chats_group_id ON chats(group_id);
   `);
   ensureGroupKindColumn(db);
+  ensureMessageReasoningColumns(db);
   ensureUniqueMessagePositions(db);
   runOneTimeMigrations(db);
+}
+
+function ensureMessageReasoningColumns(db: Database) {
+  const columns = db.prepare("PRAGMA table_info(messages)").all<{ name: string }>();
+  if (!columns.some((column) => column.name === "reasoning_content")) {
+    db.exec("ALTER TABLE messages ADD COLUMN reasoning_content TEXT");
+  }
+  if (!columns.some((column) => column.name === "reasoning_started_at")) {
+    db.exec("ALTER TABLE messages ADD COLUMN reasoning_started_at TEXT");
+  }
+  if (!columns.some((column) => column.name === "reasoning_ended_at")) {
+    db.exec("ALTER TABLE messages ADD COLUMN reasoning_ended_at TEXT");
+  }
 }
 
 function ensureGroupKindColumn(db: Database) {
