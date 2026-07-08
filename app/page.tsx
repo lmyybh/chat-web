@@ -16,7 +16,7 @@ import {
   User,
   X,
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, RefObject, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { API_SESSION_COOKIE, API_SESSION_HEADER } from "./lib/api-session";
@@ -82,6 +82,8 @@ export default function Home() {
 
   const abortControllers = useRef(new Map<string, AbortController>());
   const streamContent = useRef(new Map<string, string>());
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottom = useRef(true);
   const defaultPromptDirty = useRef(false);
   const workspaceRequestSeq = useRef(0);
   const appliedWorkspaceRequestSeq = useRef(0);
@@ -113,6 +115,7 @@ export default function Home() {
       view.type === "group" ? workspace?.groups.find((group) => group.id === view.groupId) ?? null : null,
     [view, workspace],
   );
+  const activeLastMessageContent = activeChat?.messages.at(-1)?.content;
   const selectedModel = useMemo(() => {
     if (!workspace?.models.length) {
       return null;
@@ -135,6 +138,17 @@ export default function Home() {
   useEffect(() => {
     setTitleDraft(activeChat?.title ?? "");
   }, [activeChat?.id, activeChat?.title]);
+
+  useEffect(() => {
+    stickToBottom.current = true;
+    requestAnimationFrame(() => scrollMessagesToBottom("auto"));
+  }, [activeChat?.id]);
+
+  useEffect(() => {
+    if (stickToBottom.current) {
+      requestAnimationFrame(() => scrollMessagesToBottom("smooth"));
+    }
+  }, [activeChat?.messages.length, activeLastMessageContent]);
 
   useEffect(() => {
     if (!defaultPromptDirty.current) {
@@ -266,6 +280,7 @@ export default function Home() {
     }
 
     setDraft("");
+    stickToBottom.current = true;
     const userData = await runWorkspaceAction<{ messageId: string }>({
       type: "appendMessage",
       chatId,
@@ -289,6 +304,7 @@ export default function Home() {
     }
     setEditingMessageId(null);
     setEditingContent("");
+    stickToBottom.current = true;
     const data = await runWorkspaceAction({
       type: "editUserMessageAndTruncate",
       messageId: message.id,
@@ -451,6 +467,18 @@ export default function Home() {
       delete next[chatId];
       return next;
     });
+  }
+
+  function scrollMessagesToBottom(behavior: ScrollBehavior) {
+    const element = messageListRef.current;
+    if (!element) {
+      return;
+    }
+    element.scrollTo({ top: element.scrollHeight, behavior });
+  }
+
+  function updateStickToBottom(sticks: boolean) {
+    stickToBottom.current = sticks;
   }
 
   function handleModelChange(modelId: string) {
@@ -735,6 +763,7 @@ export default function Home() {
         {view.type === "chat" && activeChat && (
           <ChatView
             chat={activeChat}
+            messageListRef={messageListRef}
             editingMessageId={editingMessageId}
             editingContent={editingContent}
             onEditingContentChange={setEditingContent}
@@ -747,6 +776,7 @@ export default function Home() {
               setEditingContent("");
             }}
             onResend={(message) => void handleResend(message)}
+            onStickToBottomChange={updateStickToBottom}
           />
         )}
 
@@ -1029,23 +1059,31 @@ function ChatListPanel({
 
 function ChatView({
   chat,
+  messageListRef,
   editingMessageId,
   editingContent,
   onEditingContentChange,
   onEditMessage,
   onCancelEdit,
   onResend,
+  onStickToBottomChange,
 }: {
   chat: ChatSession;
+  messageListRef: RefObject<HTMLDivElement>;
   editingMessageId: string | null;
   editingContent: string;
   onEditingContentChange: (content: string) => void;
   onEditMessage: (message: ChatMessage) => void;
   onCancelEdit: () => void;
   onResend: (message: ChatMessage) => void;
+  onStickToBottomChange: (sticks: boolean) => void;
 }) {
   return (
-    <div className="message-list">
+    <div
+      className="message-list"
+      ref={messageListRef}
+      onScroll={(event) => onStickToBottomChange(isNearBottom(event.currentTarget))}
+    >
       {chat.messages.length === 0 ? (
         <div className="empty-state">
           <Bot size={36} />
@@ -1068,6 +1106,10 @@ function ChatView({
       )}
     </div>
   );
+}
+
+function isNearBottom(element: HTMLElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 80;
 }
 
 function Composer({
