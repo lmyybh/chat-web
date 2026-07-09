@@ -119,15 +119,16 @@ export function getWorkspace(): Workspace {
   };
 }
 
-export function createGroup() {
+export function createGroup(name?: string) {
   ensureSeedData();
   const db = getDb();
   const createdAt = nowIso();
   const groupId = uid("group");
+  const groupName = name?.trim() || `Group ${getUserGroupCount() + 1}`;
 
   db.prepare(
     "INSERT INTO groups (id, kind, name, system_prompt, created_at, updated_at) VALUES (?, 'user', ?, ?, ?, ?)",
-  ).run(groupId, `Group ${getUserGroupCount() + 1}`, "You are a helpful assistant.", createdAt, createdAt);
+  ).run(groupId, groupName, "You are a helpful assistant.", createdAt, createdAt);
 
   return { groupId };
 }
@@ -208,6 +209,20 @@ export function renameChat(chatId: string, title: string) {
   getDb()
     .prepare("UPDATE chats SET title = ?, title_source = 'manual', updated_at = ? WHERE id = ?")
     .run(nextTitle, nowIso(), chatId);
+}
+
+export function moveChat(chatId: string, groupId: string) {
+  ensureSeedData();
+  const chat = getChatRow(chatId);
+  if (!chat) {
+    throw new Error("Chat not found.");
+  }
+  const group = getGroupRow(groupId);
+  if (!group) {
+    throw new Error("Group not found.");
+  }
+  getDb().prepare("UPDATE chats SET group_id = ?, updated_at = ? WHERE id = ?").run(groupId, nowIso(), chatId);
+  return { chatId, groupId };
 }
 
 export function setChatModel(chatId: string, modelId: string) {

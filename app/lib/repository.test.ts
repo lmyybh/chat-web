@@ -14,6 +14,7 @@ import {
   deleteModel,
   editUserMessageAndTruncate,
   getWorkspace,
+  moveChat,
   renameChat,
   updateDefaultSystemPrompt,
   updateMessageReasoning,
@@ -46,11 +47,11 @@ describe("repository", () => {
   });
 
   it("creates and deletes user groups without requiring one to remain", () => {
-    const created = createGroup();
+    const created = createGroup("Research");
 
     let workspace = getWorkspace();
     expect(workspace.groups).toHaveLength(1);
-    expect(workspace.groups[0]).toMatchObject({ id: created.groupId, kind: "user" });
+    expect(workspace.groups[0]).toMatchObject({ id: created.groupId, kind: "user", name: "Research" });
 
     deleteGroup(created.groupId);
     workspace = getWorkspace();
@@ -67,6 +68,21 @@ describe("repository", () => {
 
     expect(result?.chatId).toBe(created.chatId);
     expect(next.defaultGroup.chats).toHaveLength(0);
+  });
+
+  it("moves chats between groups", () => {
+    const group = createGroup("Projects");
+    const chat = createChat();
+
+    moveChat(chat.chatId, group.groupId);
+    let workspace = getWorkspace();
+    expect(workspace.defaultGroup.chats.map((item) => item.id)).not.toContain(chat.chatId);
+    expect(workspace.groups[0].chats.map((item) => item.id)).toContain(chat.chatId);
+
+    moveChat(chat.chatId, workspace.defaultGroup.id);
+    workspace = getWorkspace();
+    expect(workspace.defaultGroup.chats.map((item) => item.id)).toContain(chat.chatId);
+    expect(workspace.groups[0].chats.map((item) => item.id)).not.toContain(chat.chatId);
   });
 
   it("cleans up legacy empty default chats", () => {

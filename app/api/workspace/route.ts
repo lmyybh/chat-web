@@ -10,6 +10,7 @@ import {
   deleteModel,
   editUserMessageAndTruncate,
   getWorkspace,
+  moveChat,
   renameChat,
   setChatModel,
   updateDefaultSystemPrompt,
@@ -23,13 +24,14 @@ import {
 export const dynamic = "force-dynamic";
 
 type WorkspaceAction =
-  | { type: "createGroup" }
+  | { type: "createGroup"; name?: string }
   | { type: "updateGroup"; groupId: string; name: string; systemPrompt: string }
   | { type: "updateDefaultSystemPrompt"; systemPrompt: string }
   | { type: "deleteGroup"; groupId: string }
   | { type: "createChat"; groupId?: string; modelId?: string }
   | { type: "deleteChat"; chatId: string }
   | { type: "renameChat"; chatId: string; title: string }
+  | { type: "moveChat"; chatId: string; groupId: string }
   | { type: "setChatModel"; chatId: string; modelId: string }
   | { type: "createModel"; name: string; model: string; providerId: string }
   | { type: "updateModel"; modelId: string; name: string; model: string; providerId: string }
@@ -96,7 +98,7 @@ export async function POST(request: Request) {
 function runAction(action: WorkspaceAction) {
   switch (action.type) {
     case "createGroup":
-      return createGroup();
+      return createGroup(action.name);
     case "updateGroup":
       return updateGroup(action.groupId, {
         name: action.name,
@@ -112,6 +114,8 @@ function runAction(action: WorkspaceAction) {
       return deleteChat(action.chatId);
     case "renameChat":
       return renameChat(action.chatId, action.title);
+    case "moveChat":
+      return moveChat(action.chatId, action.groupId);
     case "setChatModel":
       return setChatModel(action.chatId, action.modelId);
     case "createModel":

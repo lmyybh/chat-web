@@ -12,7 +12,6 @@ import {
   ChevronDown,
   Clipboard,
   Cpu,
-  Folder,
   KeyRound,
   Menu,
   MessageSquarePlus,
@@ -28,7 +27,8 @@ import {
   User,
   X,
 } from "lucide-react";
-import { FormEvent, ReactNode, RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, ReactNode, RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { API_SESSION_COOKIE, API_SESSION_HEADER } from "./lib/api-session";
@@ -73,12 +73,44 @@ type ConfirmDialogState = {
 
 const LAST_MODEL_KEY = "chat-web:last-model";
 
+function readViewFromCurrentUrl(): View {
+  if (typeof window === "undefined") {
+    return { type: "home" };
+  }
+  const params = new URLSearchParams(window.location.search);
+  const chatId = params.get("chat")?.trim();
+  if (chatId) {
+    return { type: "chat", chatId };
+  }
+  const groupId = params.get("group")?.trim();
+  if (groupId) {
+    return { type: "group", groupId };
+  }
+  return { type: "home" };
+}
+
+function getUrlForView(view: View) {
+  const params = new URLSearchParams(window.location.search);
+  params.delete("chat");
+  params.delete("group");
+  if (view.type === "chat") {
+    params.set("chat", view.chatId);
+  } else if (view.type === "group") {
+    params.set("group", view.groupId);
+  }
+  const query = params.toString();
+  return `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+}
+
+function getCurrentPathWithSearch() {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+}
+
 export default function Home() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [providers, setProviders] = useState<PublicProvider[]>([]);
-  const [view, setView] = useState<View>({ type: "home" });
+  const [view, setView] = useState<View>(() => readViewFromCurrentUrl());
   const [draft, setDraft] = useState("");
-  const [titleDraft, setTitleDraft] = useState("");
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [pendingByChat, setPendingByChat] = useState<Record<string, PendingChat>>({});
@@ -86,9 +118,12 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [lastModelId, setLastModelId] = useState("");
+  const [groupFormOpen, setGroupFormOpen] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
   const [defaultPromptDraft, setDefaultPromptDraft] = useState("");
   const [deepThinkingEnabled, setDeepThinkingEnabled] = useState(false);
   const [uiError, setUiError] = useState<string | null>(null);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
 
@@ -113,16 +148,39 @@ export default function Home() {
   const streamReasoningStartedAt = useRef(new Map<string, string>());
   const streamReasoningEndedAt = useRef(new Map<string, string>());
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const groupFormRef = useRef<HTMLDivElement | null>(null);
+  const copyNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stickToBottom = useRef(true);
   const defaultPromptDirty = useRef(false);
   const workspaceRequestSeq = useRef(0);
   const appliedWorkspaceRequestSeq = useRef(0);
   const providersRequestSeq = useRef(0);
   const appliedProvidersRequestSeq = useRef(0);
+  const skipNextUrlSync = useRef(false);
+  const nextUrlSyncMode = useRef<"push" | "replace">("push");
 
   useEffect(() => {
     setLastModelId(window.localStorage.getItem(LAST_MODEL_KEY) || "");
     void loadInitialData();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (copyNoticeTimer.current) {
+        clearTimeout(copyNoticeTimer.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    function handlePopState() {
+      skipNextUrlSync.current = true;
+      nextUrlSyncMode.current = "push";
+      setView(readViewFromCurrentUrl());
+      setSidebarOpen(false);
+    }
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
   const allChats = useMemo(
@@ -135,10 +193,6 @@ export default function Home() {
   const activeChat = useMemo(
     () => (view.type === "chat" ? allChats.find((chat) => chat.id === view.chatId) ?? null : null),
     [allChats, view],
-  );
-  const activeChatGroup = useMemo(
-    () => (activeChat && workspace ? findGroupForChat(workspace, activeChat.id) : null),
-    [activeChat, workspace],
   );
   const activeGroup = useMemo(
     () =>
@@ -155,6 +209,34 @@ export default function Home() {
   const activePending = activeChat ? pendingByChat[activeChat.id] : undefined;
 
   useEffect(() => {
+    if (skipNextUrlSync.current) {
+      skipNextUrlSync.current = false;
+      return;
+    }
+    const nextUrl = getUrlForView(view);
+    const currentUrl = getCurrentPathWithSearch();
+    if (nextUrl === currentUrl) {
+      return;
+    }
+    const mode = nextUrlSyncMode.current;
+    nextUrlSyncMode.current = "push";
+    window.history[mode === "replace" ? "replaceState" : "pushState"]({ view }, "", nextUrl);
+  }, [view]);
+
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+    if (view.type === "chat" && !findChat(workspace, view.chatId)) {
+      navigateToView({ type: "home" }, "replace");
+      return;
+    }
+    if (view.type === "group" && !workspace.groups.some((group) => group.id === view.groupId)) {
+      navigateToView({ type: "home" }, "replace");
+    }
+  }, [view, workspace]);
+
+  useEffect(() => {
     if (!workspace?.models.length) {
       return;
     }
@@ -166,8 +248,20 @@ export default function Home() {
   }, [lastModelId, workspace?.models]);
 
   useEffect(() => {
-    setTitleDraft(activeChat?.title ?? "");
-  }, [activeChat?.id, activeChat?.title]);
+    if (!groupFormOpen) {
+      return;
+    }
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node) || groupFormRef.current?.contains(target)) {
+        return;
+      }
+      setGroupFormOpen(false);
+      setNewGroupName("");
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [groupFormOpen]);
 
   useEffect(() => {
     stickToBottom.current = true;
@@ -191,6 +285,11 @@ export default function Home() {
       setProviderId(providers[0].id);
     }
   }, [providerId, providers]);
+
+  function navigateToView(nextView: View, mode: "push" | "replace" = "push") {
+    nextUrlSyncMode.current = mode;
+    setView(nextView);
+  }
 
   async function loadInitialData() {
     const [workspaceResponse, providersResponse] = await Promise.all([
@@ -303,7 +402,7 @@ export default function Home() {
       chatId = created.result?.chatId ?? "";
       nextWorkspace = created.workspace;
       if (chatId) {
-        setView({ type: "chat", chatId });
+        navigateToView({ type: "chat", chatId });
       }
     }
     if (!chatId || pendingByChat[chatId]?.status === "streaming") {
@@ -590,6 +689,25 @@ export default function Home() {
     setUiError(error instanceof Error ? error.message : fallback);
   }
 
+  function handleCopyText(text: string) {
+    void copyText(text)
+      .then(() => {
+        setUiError(null);
+        setCopyNotice("复制成功");
+        if (copyNoticeTimer.current) {
+          clearTimeout(copyNoticeTimer.current);
+        }
+        copyNoticeTimer.current = setTimeout(() => {
+          setCopyNotice(null);
+          copyNoticeTimer.current = null;
+        }, 1600);
+      })
+      .catch((error) => {
+        setCopyNotice(null);
+        showUiError(error, "复制失败。");
+      });
+  }
+
   async function handleConfirmAction() {
     if (!confirmDialog || confirmBusy) {
       return;
@@ -631,12 +749,24 @@ export default function Home() {
     }
   }
 
-  async function handleCreateGroup() {
-    const data = await runWorkspaceAction<{ groupId: string }>({ type: "createGroup" });
+  async function handleCreateGroup(event: FormEvent) {
+    event.preventDefault();
+    const name = newGroupName.trim();
+    if (!name) {
+      return;
+    }
+    const data = await runWorkspaceAction<{ groupId: string }>({ type: "createGroup", name });
     if (data.result) {
-      setView({ type: "group", groupId: data.result.groupId });
+      setGroupFormOpen(false);
+      setNewGroupName("");
+      navigateToView({ type: "group", groupId: data.result.groupId });
       setSidebarOpen(false);
     }
+  }
+
+  function handleCancelCreateGroup() {
+    setGroupFormOpen(false);
+    setNewGroupName("");
   }
 
   function handleDeleteGroup(group: ChatGroup) {
@@ -648,9 +778,23 @@ export default function Home() {
       onConfirm: async () => {
         group.chats.forEach((chat) => stopChat(chat.id));
         await runWorkspaceAction({ type: "deleteGroup", groupId: group.id });
-        setView({ type: "home" });
+        navigateToView({ type: "home" }, "replace");
       },
     });
+  }
+
+  async function handleRenameGroup(group: ChatGroup, name: string) {
+    try {
+      await runWorkspaceAction({
+        type: "updateGroup",
+        groupId: group.id,
+        name,
+        systemPrompt: group.systemPrompt,
+      });
+      setUiError(null);
+    } catch (error) {
+      showUiError(error, "分组重命名失败。");
+    }
   }
 
   async function handleCreateChat(groupId?: string) {
@@ -663,7 +807,7 @@ export default function Home() {
       modelId: selectedModel.id,
     });
     if (data.result) {
-      setView({ type: "chat", chatId: data.result.chatId });
+      navigateToView({ type: "chat", chatId: data.result.chatId });
       setSidebarOpen(false);
     }
   }
@@ -678,10 +822,36 @@ export default function Home() {
         stopChat(chat.id);
         await runWorkspaceAction({ type: "deleteChat", chatId: chat.id });
         if (view.type === "chat" && view.chatId === chat.id) {
-          setView({ type: "home" });
+          navigateToView({ type: "home" }, "replace");
         }
       },
     });
+  }
+
+  async function handleRenameChat(chat: ChatSession, title: string) {
+    try {
+      await runWorkspaceAction({
+        type: "renameChat",
+        chatId: chat.id,
+        title,
+      });
+      setUiError(null);
+    } catch (error) {
+      showUiError(error, "对话重命名失败。");
+    }
+  }
+
+  async function handleMoveChat(chat: ChatSession, groupId: string) {
+    try {
+      await runWorkspaceAction<{ chatId: string; groupId: string }>({
+        type: "moveChat",
+        chatId: chat.id,
+        groupId,
+      });
+      setUiError(null);
+    } catch (error) {
+      showUiError(error, "移动对话失败。");
+    }
   }
 
   async function handleAddModel(event: FormEvent) {
@@ -815,44 +985,57 @@ export default function Home() {
             </button>
           </div>
 
-          <nav className="nav-stack" aria-label="主要导航">
-            <button
-              className={view.type === "home" ? "nav-item active" : "nav-item"}
-              type="button"
-              onClick={() => {
-                setView({ type: "home" });
-                setSidebarOpen(false);
-              }}
-            >
-              <Folder size={17} />
-              我的空间
-            </button>
-          </nav>
-
           <section className="sidebar-section">
             <div className="sidebar-section-title">
               <span>对话分组</span>
-              <button className="link-icon-button" type="button" title="新分组" onClick={handleCreateGroup}>
-                <Plus size={16} />
-              </button>
+              <div className="group-create-anchor" ref={groupFormRef}>
+                <button
+                  className="link-icon-button"
+                  type="button"
+                  title="新分组"
+                  aria-expanded={groupFormOpen}
+                  onClick={() => setGroupFormOpen((open) => !open)}
+                >
+                  <Plus size={16} />
+                </button>
+                {groupFormOpen && (
+                  <form className="group-create-popover" onSubmit={handleCreateGroup}>
+                    <label htmlFor="new-group-name">分组名</label>
+                    <input
+                      id="new-group-name"
+                      autoFocus
+                      value={newGroupName}
+                      onChange={(event) => setNewGroupName(event.target.value)}
+                      placeholder="输入分组名"
+                    />
+                    <div className="group-create-actions">
+                      <button className="text-button muted" type="button" onClick={handleCancelCreateGroup}>
+                        取消
+                      </button>
+                      <button className="primary-button" type="submit" disabled={!newGroupName.trim()}>
+                        确认
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
             </div>
             <div className="group-list">
               {workspace.groups.length === 0 ? (
                 <div className="sidebar-empty">暂无分组</div>
               ) : (
                 workspace.groups.map((group) => (
-                  <button
+                  <SidebarGroupRow
                     key={group.id}
-                    className={view.type === "group" && view.groupId === group.id ? "group-item active" : "group-item"}
-                    type="button"
-                    onClick={() => {
-                      setView({ type: "group", groupId: group.id });
+                    group={group}
+                    active={view.type === "group" && view.groupId === group.id}
+                    onOpen={() => {
+                      navigateToView({ type: "group", groupId: group.id });
                       setSidebarOpen(false);
                     }}
-                  >
-                    <span>{group.name}</span>
-                    <small>{group.chats.length}</small>
-                  </button>
+                    onRename={(name) => handleRenameGroup(group, name)}
+                    onDelete={() => handleDeleteGroup(group)}
+                  />
                 ))
               )}
             </div>
@@ -874,9 +1057,12 @@ export default function Home() {
                         chat={chat}
                         active={view.type === "chat" && view.chatId === chat.id}
                         onOpen={() => {
-                          setView({ type: "chat", chatId: chat.id });
+                          navigateToView({ type: "chat", chatId: chat.id });
                           setSidebarOpen(false);
                         }}
+                        groups={[workspace.defaultGroup, ...workspace.groups]}
+                        onRename={(title) => handleRenameChat(chat, title)}
+                        onMove={(groupId) => handleMoveChat(chat, groupId)}
                         onDelete={() => handleDeleteChat(chat)}
                       />
                     ))
@@ -922,7 +1108,10 @@ export default function Home() {
               onError={(error) => showUiError(error, "分组设置保存失败。")}
               onDeleteGroup={() => void handleDeleteGroup(activeGroup)}
               onCreateChat={() => void handleCreateChat(activeGroup.id)}
-              onOpenChat={(chatId) => setView({ type: "chat", chatId })}
+              onOpenChat={(chatId) => navigateToView({ type: "chat", chatId })}
+              groups={[workspace.defaultGroup, ...workspace.groups]}
+              onRenameChat={handleRenameChat}
+              onMoveChat={handleMoveChat}
               onDeleteChat={handleDeleteChat}
             />
           )}
@@ -930,21 +1119,9 @@ export default function Home() {
           {view.type === "chat" && activeChat && (
             <ChatView
               chat={activeChat}
-              groupLabel={activeChatGroup?.kind === "default" ? "最近对话" : activeChatGroup?.name ?? "对话"}
-              titleDraft={titleDraft}
               messageListRef={messageListRef}
               editingMessageId={editingMessageId}
               editingContent={editingContent}
-              onTitleDraftChange={setTitleDraft}
-              onTitleBlur={() => {
-                if (titleDraft.trim() !== activeChat.title) {
-                  void runWorkspaceAction({
-                    type: "renameChat",
-                    chatId: activeChat.id,
-                    title: titleDraft,
-                  });
-                }
-              }}
               onEditingContentChange={setEditingContent}
               onEditMessage={(message) => {
                 setEditingMessageId(message.id);
@@ -955,6 +1132,7 @@ export default function Home() {
                 setEditingContent("");
               }}
               onResend={(message) => void handleResend(message)}
+              onCopyText={handleCopyText}
               onStickToBottomChange={updateStickToBottom}
             />
           )}
@@ -969,6 +1147,12 @@ export default function Home() {
               <button type="button" onClick={() => setUiError(null)}>
                 <X size={15} />
               </button>
+            </div>
+          )}
+
+          {copyNotice && (
+            <div className="copy-toast" role="status" aria-live="polite">
+              {copyNotice}
             </div>
           )}
 
@@ -1253,39 +1437,475 @@ function ConfirmDialog({
   );
 }
 
+function SidebarGroupRow({
+  group,
+  active,
+  onOpen,
+  onRename,
+  onDelete,
+}: {
+  group: ChatGroup;
+  active: boolean;
+  onOpen: () => void;
+  onRename: (name: string) => Promise<void> | void;
+  onDelete: () => void;
+}) {
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [draft, setDraft] = useState(group.name);
+  const renamePopoverRef = useRef<HTMLDivElement | null>(null);
+  const menuAnchorRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useFocusWhenEditing(renameOpen);
+
+  useEffect(() => {
+    if (!renameOpen) {
+      setDraft(group.name);
+    }
+  }, [group.name, renameOpen]);
+
+  useDismissFloatingForm(renameOpen, renamePopoverRef, () => {
+    setRenameOpen(false);
+    setDraft(group.name);
+  });
+
+  async function submitRename(event: FormEvent) {
+    event.preventDefault();
+    const next = draft.trim();
+    if (!next) {
+      return;
+    }
+    if (next !== group.name) {
+      await onRename(next);
+    }
+    setRenameOpen(false);
+  }
+
+  function cancelRename() {
+    setDraft(group.name);
+    setRenameOpen(false);
+  }
+
+  return (
+    <div className={active ? "group-row active" : "group-row"}>
+      <button className="group-title" type="button" onClick={onOpen}>
+        <span>{group.name}</span>
+        <small>{group.chats.length}</small>
+      </button>
+      <div className="row-menu-anchor" ref={menuAnchorRef}>
+        <DropdownMenu.Root modal={false}>
+          <DropdownMenu.Trigger asChild>
+            <button className="row-menu-button" type="button" title="更多">
+              <MoreHorizontal size={16} />
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="dropdown-content" side="right" sideOffset={8} align="start">
+              <DropdownMenu.Item className="dropdown-item" onSelect={() => openFloatingRename(setRenameOpen)}>
+                <Pencil size={14} />
+                重命名
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator className="dropdown-separator" />
+              <DropdownMenu.Item className="dropdown-item danger" onSelect={onDelete}>
+                <Trash2 size={14} />
+                删除分组
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
+        {renameOpen && (
+          <RenamePopover
+            refObject={renamePopoverRef}
+            inputRef={inputRef}
+            title="重命名分组"
+            value={draft}
+            placeholder="输入分组名"
+            onValueChange={setDraft}
+            onSubmit={submitRename}
+            onCancel={cancelRename}
+            anchorRef={menuAnchorRef}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SidebarChatRow({
   chat,
   active,
+  groups,
   onOpen,
+  onRename,
+  onMove,
   onDelete,
 }: {
   chat: ChatSession;
   active: boolean;
+  groups: ChatGroup[];
   onOpen: () => void;
+  onRename: (title: string) => Promise<void> | void;
+  onMove: (groupId: string) => Promise<void> | void;
   onDelete: () => void;
 }) {
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [draft, setDraft] = useState(formatChatTitle(chat.title));
+  const renamePopoverRef = useRef<HTMLDivElement | null>(null);
+  const menuAnchorRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useFocusWhenEditing(renameOpen);
+
+  useEffect(() => {
+    if (!renameOpen) {
+      setDraft(formatChatTitle(chat.title));
+    }
+  }, [chat.title, renameOpen]);
+
+  useDismissFloatingForm(renameOpen, renamePopoverRef, () => {
+    setRenameOpen(false);
+    setDraft(formatChatTitle(chat.title));
+  });
+
+  async function submitRename(event: FormEvent) {
+    event.preventDefault();
+    const next = draft.trim();
+    if (!next) {
+      return;
+    }
+    if (next !== formatChatTitle(chat.title)) {
+      await onRename(next);
+    }
+    setRenameOpen(false);
+  }
+
+  function cancelRename() {
+    setDraft(formatChatTitle(chat.title));
+    setRenameOpen(false);
+  }
+
   return (
     <div className={active ? "chat-row active" : "chat-row"}>
       <button className="chat-title" type="button" onClick={onOpen}>
         {formatChatTitle(chat.title)}
       </button>
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <button className="row-menu-button" type="button" title="更多">
-            <MoreHorizontal size={16} />
-          </button>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content className="dropdown-content" sideOffset={6} align="end">
-            <DropdownMenu.Item className="dropdown-item danger" onSelect={onDelete}>
-              <Trash2 size={14} />
-              删除对话
-            </DropdownMenu.Item>
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
+      <div className="row-menu-anchor" ref={menuAnchorRef}>
+        <DropdownMenu.Root modal={false}>
+          <DropdownMenu.Trigger asChild>
+            <button className="row-menu-button" type="button" title="更多">
+              <MoreHorizontal size={16} />
+            </button>
+          </DropdownMenu.Trigger>
+          <ChatRowMenu
+            chat={chat}
+            groups={groups}
+            onRename={() => openFloatingRename(setRenameOpen)}
+            onMove={onMove}
+            onDelete={onDelete}
+          />
+        </DropdownMenu.Root>
+        {renameOpen && (
+          <RenamePopover
+            refObject={renamePopoverRef}
+            inputRef={inputRef}
+            title="重命名对话"
+            value={draft}
+            placeholder="输入对话名"
+            onValueChange={setDraft}
+            onSubmit={submitRename}
+            onCancel={cancelRename}
+            anchorRef={menuAnchorRef}
+          />
+        )}
+      </div>
     </div>
   );
+}
+
+function ChatRowMenu({
+  chat,
+  groups,
+  onRename,
+  onMove,
+  onDelete,
+}: {
+  chat: ChatSession;
+  groups: ChatGroup[];
+  onRename: () => void;
+  onMove: (groupId: string) => Promise<void> | void;
+  onDelete: () => void;
+}) {
+  return (
+    <DropdownMenu.Portal>
+      <DropdownMenu.Content className="dropdown-content" side="right" sideOffset={8} align="start">
+        <DropdownMenu.Item className="dropdown-item" onSelect={onRename}>
+          <Pencil size={14} />
+          重命名
+        </DropdownMenu.Item>
+        <DropdownMenu.Sub>
+          <DropdownMenu.SubTrigger className="dropdown-item">
+            <ChevronDown size={14} />
+            移动到分组
+          </DropdownMenu.SubTrigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.SubContent className="dropdown-content" sideOffset={6} alignOffset={-4}>
+              {groups.map((group) => (
+                <DropdownMenu.Item
+                  key={group.id}
+                  className="dropdown-item"
+                  disabled={chat.groupId === group.id}
+                  onSelect={() => onMove(group.id)}
+                >
+                  {group.kind === "default" ? "最近对话" : group.name}
+                </DropdownMenu.Item>
+              ))}
+            </DropdownMenu.SubContent>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Sub>
+        <DropdownMenu.Separator className="dropdown-separator" />
+        <DropdownMenu.Item className="dropdown-item danger" onSelect={onDelete}>
+          <Trash2 size={14} />
+          删除对话
+        </DropdownMenu.Item>
+      </DropdownMenu.Content>
+    </DropdownMenu.Portal>
+  );
+}
+
+function useFocusWhenEditing(editing: boolean) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!editing) {
+      return;
+    }
+    let focusFrame = 0;
+    const frame = requestAnimationFrame(() => {
+      focusFrame = requestAnimationFrame(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      cancelAnimationFrame(focusFrame);
+    };
+  }, [editing]);
+  return inputRef;
+}
+
+function useTextareaFocusWhenEditing(editing: boolean) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    if (!editing) {
+      return;
+    }
+    let focusFrame = 0;
+    const frame = requestAnimationFrame(() => {
+      focusFrame = requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.select();
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      cancelAnimationFrame(focusFrame);
+    };
+  }, [editing]);
+  return textareaRef;
+}
+
+function openFloatingRename(setOpen: (open: boolean) => void) {
+  requestAnimationFrame(() => setOpen(true));
+}
+
+function useDismissFloatingForm(open: boolean, ref: RefObject<HTMLElement>, onDismiss: () => void) {
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node) || ref.current?.contains(target)) {
+        return;
+      }
+      onDismiss();
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [onDismiss, open, ref]);
+}
+
+function useFloatingFormPosition(anchorRef?: RefObject<HTMLElement>) {
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+
+  useEffect(() => {
+    if (!anchorRef) {
+      setPosition(null);
+      return;
+    }
+    const anchor = anchorRef;
+
+    function updatePosition() {
+      const element = anchor.current;
+      if (!element) {
+        return;
+      }
+      const rect = element.getBoundingClientRect();
+      setPosition({
+        top: Math.max(8, rect.top - 6),
+        left: rect.right + 8,
+      });
+    }
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [anchorRef]);
+
+  return position;
+}
+
+function useFloatingBelowPosition(anchorRef: RefObject<HTMLElement>) {
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+
+  useEffect(() => {
+    function updatePosition() {
+      const element = anchorRef.current;
+      if (!element) {
+        return;
+      }
+      const rect = element.getBoundingClientRect();
+      const panelWidth = Math.min(420, window.innerWidth - 24);
+      setPosition({
+        top: rect.bottom + 8,
+        left: Math.min(Math.max(12, rect.left), window.innerWidth - panelWidth - 12),
+      });
+    }
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [anchorRef]);
+
+  return position;
+}
+
+function RenamePopover({
+  refObject,
+  inputRef,
+  anchorRef,
+  title,
+  value,
+  placeholder,
+  onValueChange,
+  onSubmit,
+  onCancel,
+}: {
+  refObject: RefObject<HTMLDivElement>;
+  inputRef: RefObject<HTMLInputElement>;
+  anchorRef?: RefObject<HTMLElement>;
+  title: string;
+  value: string;
+  placeholder: string;
+  onValueChange: (value: string) => void;
+  onSubmit: (event: FormEvent) => void;
+  onCancel: () => void;
+}) {
+  const position = useFloatingFormPosition(anchorRef);
+  const style: CSSProperties | undefined = anchorRef
+    ? {
+        top: position?.top ?? 0,
+        left: position?.left ?? 0,
+        visibility: position ? "visible" : "hidden",
+      }
+    : undefined;
+  const popover = (
+    <div className={anchorRef ? "rename-popover-anchor floating" : "rename-popover-anchor"} ref={refObject} style={style}>
+      <form className="rename-popover" onSubmit={onSubmit}>
+        <label>
+          {title}
+          <input
+            ref={inputRef}
+            value={value}
+            onChange={(event) => onValueChange(event.target.value)}
+            placeholder={placeholder}
+          />
+        </label>
+        <div className="rename-popover-actions">
+          <button className="text-button muted" type="button" onClick={onCancel}>
+            取消
+          </button>
+          <button className="primary-button" type="submit" disabled={!value.trim()}>
+            确认
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+  if (anchorRef && typeof document !== "undefined") {
+    return createPortal(popover, document.body);
+  }
+  return popover;
+}
+
+function InstructionPopover({
+  refObject,
+  anchorRef,
+  textareaRef,
+  value,
+  onValueChange,
+  onSubmit,
+  onCancel,
+}: {
+  refObject: RefObject<HTMLDivElement>;
+  anchorRef: RefObject<HTMLElement>;
+  textareaRef: RefObject<HTMLTextAreaElement>;
+  value: string;
+  onValueChange: (value: string) => void;
+  onSubmit: (event: FormEvent) => void;
+  onCancel: () => void;
+}) {
+  const position = useFloatingBelowPosition(anchorRef);
+  const popover = (
+    <div
+      className="instruction-popover-panel"
+      ref={refObject}
+      style={{
+        top: position?.top ?? 0,
+        left: position?.left ?? 0,
+        visibility: position ? "visible" : "hidden",
+      }}
+    >
+      <form className="rename-popover instruction-popover" onSubmit={onSubmit}>
+        <label>
+          编辑指令
+          <textarea
+            ref={textareaRef}
+            value={value}
+            onChange={(event) => onValueChange(event.target.value)}
+            placeholder="输入这个分组的系统指令"
+            rows={5}
+          />
+        </label>
+        <div className="rename-popover-actions">
+          <button className="text-button muted" type="button" onClick={onCancel}>
+            取消
+          </button>
+          <button className="primary-button" type="submit">
+            确认
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+  if (typeof document !== "undefined") {
+    return createPortal(popover, document.body);
+  }
+  return popover;
 }
 
 function ModelSelect({
@@ -1349,6 +1969,9 @@ function GroupView({
   onDeleteGroup,
   onCreateChat,
   onOpenChat,
+  groups,
+  onRenameChat,
+  onMoveChat,
   onDeleteChat,
 }: {
   group: ChatGroup;
@@ -1357,34 +1980,42 @@ function GroupView({
   onDeleteGroup: () => void;
   onCreateChat: () => void;
   onOpenChat: (chatId: string) => void;
+  groups: ChatGroup[];
+  onRenameChat: (chat: ChatSession, title: string) => Promise<void> | void;
+  onMoveChat: (chat: ChatSession, groupId: string) => Promise<void> | void;
   onDeleteChat: (chat: ChatSession) => void;
 }) {
-  const [nameDraft, setNameDraft] = useState(group.name);
   const [systemPromptDraft, setSystemPromptDraft] = useState(group.systemPrompt);
-  const [editingGroupSettings, setEditingGroupSettings] = useState(false);
-  const draftDirty = useRef(false);
+  const [instructionOpen, setInstructionOpen] = useState(false);
+  const instructionPopoverRef = useRef<HTMLDivElement | null>(null);
+  const instructionAnchorRef = useRef<HTMLDivElement | null>(null);
+  const instructionInputRef = useTextareaFocusWhenEditing(instructionOpen);
 
   useEffect(() => {
-    if (!draftDirty.current) {
-      setNameDraft(group.name);
-      setSystemPromptDraft(group.systemPrompt);
-    }
-    setEditingGroupSettings(false);
+    setSystemPromptDraft(group.systemPrompt);
+    setInstructionOpen(false);
   }, [group.id, group.name, group.systemPrompt]);
 
-  async function saveGroupDraft() {
-    if (nameDraft === group.name && systemPromptDraft === group.systemPrompt) {
-      draftDirty.current = false;
-      return;
-    }
-    const patch = { name: nameDraft, systemPrompt: systemPromptDraft };
-    draftDirty.current = false;
+  useDismissFloatingForm(instructionOpen, instructionPopoverRef, () => {
+    setSystemPromptDraft(group.systemPrompt);
+    setInstructionOpen(false);
+  });
+
+  async function submitInstruction(event: FormEvent) {
+    event.preventDefault();
     try {
-      await onUpdateGroup(patch);
+      if (systemPromptDraft !== group.systemPrompt) {
+        await onUpdateGroup({ name: group.name, systemPrompt: systemPromptDraft });
+      }
+      setInstructionOpen(false);
     } catch (error) {
-      draftDirty.current = true;
       onError(error);
     }
+  }
+
+  function cancelInstructionEdit() {
+    setSystemPromptDraft(group.systemPrompt);
+    setInstructionOpen(false);
   }
 
   return (
@@ -1395,60 +2026,48 @@ function GroupView({
           <div className="group-instruction">
             <span>指令：</span>
             <p>{group.systemPrompt.trim() || "这个分组尚未设置系统提示词"}</p>
-            <button
-              className="inline-icon-button"
-              type="button"
-              title="编辑分组设置"
-              onClick={() => setEditingGroupSettings((open) => !open)}
-            >
-              <Pencil size={15} />
-            </button>
+            <div className="instruction-edit-anchor" ref={instructionAnchorRef}>
+              <button
+                className="inline-icon-button"
+                type="button"
+                title="编辑指令"
+                aria-expanded={instructionOpen}
+                onClick={() => setInstructionOpen((open) => !open)}
+              >
+                <Pencil size={13} />
+              </button>
+              {instructionOpen && (
+                <InstructionPopover
+                  refObject={instructionPopoverRef}
+                  anchorRef={instructionAnchorRef}
+                  textareaRef={instructionInputRef}
+                  value={systemPromptDraft}
+                  onValueChange={setSystemPromptDraft}
+                  onSubmit={submitInstruction}
+                  onCancel={cancelInstructionEdit}
+                />
+              )}
+            </div>
+            <span className="group-instruction-divider" aria-hidden="true" />
+            <div className="group-instruction-actions">
+              <button className="group-instruction-button" type="button" title="新对话" onClick={onCreateChat}>
+                <MessageSquarePlus size={13} />
+              </button>
+              <button className="group-instruction-button danger" type="button" title="删除分组" onClick={onDeleteGroup}>
+                <Trash2 size={13} />
+              </button>
+            </div>
           </div>
         </div>
-        <div className="group-hero-actions">
-          <button className="text-button" type="button" onClick={onCreateChat}>
-            <MessageSquarePlus size={15} />
-            新对话
-          </button>
-          <button className="text-button danger-text" type="button" onClick={onDeleteGroup}>
-            <Trash2 size={15} />
-            删除
-          </button>
-        </div>
       </header>
-
-      {editingGroupSettings && (
-        <section className="group-settings-panel">
-          <label>
-            分组名称
-            <input
-              value={nameDraft}
-              onChange={(event) => {
-                draftDirty.current = true;
-                setNameDraft(event.target.value);
-              }}
-              onBlur={() => void saveGroupDraft()}
-            />
-          </label>
-          <label>
-            系统提示词
-            <textarea
-              value={systemPromptDraft}
-              onChange={(event) => {
-                draftDirty.current = true;
-                setSystemPromptDraft(event.target.value);
-              }}
-              onBlur={() => void saveGroupDraft()}
-              rows={4}
-            />
-          </label>
-        </section>
-      )}
 
       <ChatListPanel
         chats={group.chats}
         emptyText="这个分组还没有对话。"
         onOpenChat={onOpenChat}
+        groups={groups}
+        onRenameChat={onRenameChat}
+        onMoveChat={onMoveChat}
         onDeleteChat={onDeleteChat}
       />
     </div>
@@ -1459,11 +2078,17 @@ function ChatListPanel({
   chats,
   emptyText,
   onOpenChat,
+  groups,
+  onRenameChat,
+  onMoveChat,
   onDeleteChat,
 }: {
   chats: ChatSession[];
   emptyText: string;
   onOpenChat: (chatId: string) => void;
+  groups: ChatGroup[];
+  onRenameChat: (chat: ChatSession, title: string) => Promise<void> | void;
+  onMoveChat: (chat: ChatSession, groupId: string) => Promise<void> | void;
   onDeleteChat: (chat: ChatSession) => void;
 }) {
   return (
@@ -1473,18 +2098,15 @@ function ChatListPanel({
       ) : (
         <div className="compact-chat-list">
           {chats.map((chat) => (
-            <div key={chat.id} className="compact-chat-row">
-              <button className="compact-chat-title" type="button" onClick={() => onOpenChat(chat.id)}>
-                <div>
-                  <strong>{formatChatTitle(chat.title)}</strong>
-                  <p>{getChatPreview(chat)}</p>
-                </div>
-                <time>{formatDate(chat.updatedAt)}</time>
-              </button>
-              <button className="icon-button danger" type="button" title="删除对话" onClick={() => onDeleteChat(chat)}>
-                <Trash2 size={15} />
-              </button>
-            </div>
+            <CompactChatRow
+              key={chat.id}
+              chat={chat}
+              groups={groups}
+              onOpen={() => onOpenChat(chat.id)}
+              onRename={(title) => onRenameChat(chat, title)}
+              onMove={(groupId) => onMoveChat(chat, groupId)}
+              onDelete={() => onDeleteChat(chat)}
+            />
           ))}
         </div>
       )}
@@ -1492,33 +2114,118 @@ function ChatListPanel({
   );
 }
 
+function CompactChatRow({
+  chat,
+  groups,
+  onOpen,
+  onRename,
+  onMove,
+  onDelete,
+}: {
+  chat: ChatSession;
+  groups: ChatGroup[];
+  onOpen: () => void;
+  onRename: (title: string) => Promise<void> | void;
+  onMove: (groupId: string) => Promise<void> | void;
+  onDelete: () => void;
+}) {
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [draft, setDraft] = useState(formatChatTitle(chat.title));
+  const renamePopoverRef = useRef<HTMLDivElement | null>(null);
+  const menuAnchorRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useFocusWhenEditing(renameOpen);
+
+  useEffect(() => {
+    if (!renameOpen) {
+      setDraft(formatChatTitle(chat.title));
+    }
+  }, [chat.title, renameOpen]);
+
+  useDismissFloatingForm(renameOpen, renamePopoverRef, () => {
+    setRenameOpen(false);
+    setDraft(formatChatTitle(chat.title));
+  });
+
+  async function submitRename(event: FormEvent) {
+    event.preventDefault();
+    const next = draft.trim();
+    if (!next) {
+      return;
+    }
+    if (next !== formatChatTitle(chat.title)) {
+      await onRename(next);
+    }
+    setRenameOpen(false);
+  }
+
+  function cancelRename() {
+    setDraft(formatChatTitle(chat.title));
+    setRenameOpen(false);
+  }
+
+  return (
+    <div className="compact-chat-row">
+      <button className="compact-chat-title" type="button" onClick={onOpen}>
+        <div>
+          <strong>{formatChatTitle(chat.title)}</strong>
+          <p>{getChatPreview(chat)}</p>
+        </div>
+        <time>{formatDate(chat.updatedAt)}</time>
+      </button>
+      <div className="row-menu-anchor" ref={menuAnchorRef}>
+        <DropdownMenu.Root modal={false}>
+          <DropdownMenu.Trigger asChild>
+            <button className="row-menu-button" type="button" title="更多">
+              <MoreHorizontal size={16} />
+            </button>
+          </DropdownMenu.Trigger>
+          <ChatRowMenu
+            chat={chat}
+            groups={groups}
+            onRename={() => openFloatingRename(setRenameOpen)}
+            onMove={onMove}
+            onDelete={onDelete}
+          />
+        </DropdownMenu.Root>
+        {renameOpen && (
+          <RenamePopover
+            refObject={renamePopoverRef}
+            inputRef={inputRef}
+            title="重命名对话"
+            value={draft}
+            placeholder="输入对话名"
+            onValueChange={setDraft}
+            onSubmit={submitRename}
+            onCancel={cancelRename}
+            anchorRef={menuAnchorRef}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ChatView({
   chat,
-  groupLabel,
-  titleDraft,
   messageListRef,
   editingMessageId,
   editingContent,
-  onTitleDraftChange,
-  onTitleBlur,
   onEditingContentChange,
   onEditMessage,
   onCancelEdit,
   onResend,
+  onCopyText,
   onStickToBottomChange,
 }: {
   chat: ChatSession;
-  groupLabel: string;
-  titleDraft: string;
   messageListRef: RefObject<HTMLDivElement>;
   editingMessageId: string | null;
   editingContent: string;
-  onTitleDraftChange: (title: string) => void;
-  onTitleBlur: () => void;
   onEditingContentChange: (content: string) => void;
   onEditMessage: (message: ChatMessage) => void;
   onCancelEdit: () => void;
   onResend: (message: ChatMessage) => void;
+  onCopyText: (text: string) => void;
   onStickToBottomChange: (sticks: boolean) => void;
 }) {
   return (
@@ -1527,10 +2234,6 @@ function ChatView({
       ref={messageListRef}
       onScroll={(event) => onStickToBottomChange(isNearBottom(event.currentTarget))}
     >
-      <div className="chat-title-editor">
-        <p>{groupLabel}</p>
-        <input value={titleDraft} onChange={(event) => onTitleDraftChange(event.target.value)} onBlur={onTitleBlur} placeholder="新对话" />
-      </div>
       {chat.messages.length === 0 ? (
         <div className="empty-state">
           <Sparkles size={34} />
@@ -1548,6 +2251,7 @@ function ChatView({
             onEdit={() => onEditMessage(message)}
             onCancelEdit={onCancelEdit}
             onResend={() => onResend(message)}
+            onCopyText={onCopyText}
           />
         ))
       )}
@@ -1625,6 +2329,7 @@ function MessageView({
   onEdit,
   onCancelEdit,
   onResend,
+  onCopyText,
 }: {
   message: ChatMessage;
   editingMessageId: string | null;
@@ -1633,11 +2338,12 @@ function MessageView({
   onEdit: () => void;
   onCancelEdit: () => void;
   onResend: () => void;
+  onCopyText: (text: string) => void;
 }) {
   const isEditing = editingMessageId === message.id;
   const [reasoningOpen, setReasoningOpen] = useState(message.status === "streaming");
   const hasReasoning = message.role === "assistant" && Boolean(message.reasoningContent?.trim());
-  const label = message.role === "user" ? "你" : "助手";
+  const label = message.role === "assistant" ? "助手" : "";
 
   useEffect(() => {
     if (message.status === "streaming" && hasReasoning) {
@@ -1650,64 +2356,73 @@ function MessageView({
       <div className="avatar" aria-hidden="true">
         {message.role === "user" ? <User size={17} /> : <Bot size={17} />}
       </div>
-      <div className="message-body">
+      <div className="message-shell">
         <div className="message-meta">
-          <strong>{label}</strong>
-          {message.modelNameSnapshot && <span>{message.modelNameSnapshot}</span>}
+          {label && <strong>{label}</strong>}
           {message.status !== "done" && <span>{formatMessageStatus(message.status)}</span>}
-          <button className="inline-icon-button" type="button" title="复制消息" onClick={() => copyText(message.content)}>
-            <Clipboard size={14} />
-          </button>
+          <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
         </div>
-        {isEditing ? (
-          <textarea
-            className="edit-box"
-            value={editingContent}
-            onChange={(event) => onEditingContentChange(event.target.value)}
-            rows={5}
-          />
-        ) : message.role === "assistant" ? (
-          <>
-            {hasReasoning && (
-              <ReasoningPanel
-                message={message}
-                open={reasoningOpen}
-                onOpenChange={() => setReasoningOpen((open) => !open)}
-              />
-            )}
-            <div className="markdown-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                {message.content || (message.status === "streaming" ? " " : "")}
-              </ReactMarkdown>
-            </div>
-          </>
-        ) : (
-          <p>{message.content}</p>
-        )}
-        {message.error && <div className="message-error">{message.error}</div>}
-        {message.role === "user" && (
-          <div className="message-actions">
-            {isEditing ? (
-              <>
-                <button className="text-button" type="button" onClick={onResend}>
-                  <Check size={15} /> 保存并重发
-                </button>
-                <button className="text-button muted" type="button" onClick={onCancelEdit}>
-                  <X size={15} /> 取消
-                </button>
-              </>
-            ) : (
-              <>
-                <button className="message-action-button" type="button" title="编辑消息" onClick={onEdit}>
-                  <Pencil size={15} />
-                </button>
-                <button className="message-action-button" type="button" title="重发消息" onClick={onResend}>
-                  <RefreshCcw size={15} />
-                </button>
-              </>
-            )}
-          </div>
-        )}
+
+        <div className="message-body">
+          {isEditing ? (
+            <textarea
+              className="edit-box"
+              value={editingContent}
+              onChange={(event) => onEditingContentChange(event.target.value)}
+              rows={5}
+            />
+          ) : message.role === "assistant" ? (
+            <>
+              {hasReasoning && (
+                <ReasoningPanel
+                  message={message}
+                  open={reasoningOpen}
+                  onOpenChange={() => setReasoningOpen((open) => !open)}
+                  onCopyText={onCopyText}
+                />
+              )}
+              <div className="markdown-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={createMarkdownComponents(onCopyText)}>
+                  {message.content || (message.status === "streaming" ? " " : "")}
+                </ReactMarkdown>
+              </div>
+            </>
+          ) : (
+            <p>{message.content}</p>
+          )}
+          {message.error && <div className="message-error">{message.error}</div>}
+        </div>
+
+        <div className="message-actions">
+          {message.role === "assistant" ? (
+            <>
+              <button className="message-action-button" type="button" title="复制消息" onClick={() => onCopyText(message.content)}>
+                <Clipboard size={13} />
+              </button>
+              <button className="message-action-button" type="button" title="重新生成" onClick={onResend}>
+                <RefreshCcw size={13} />
+              </button>
+            </>
+          ) : isEditing ? (
+            <>
+              <button className="text-button" type="button" onClick={onResend}>
+                <Check size={15} /> 保存并重发
+              </button>
+              <button className="text-button muted" type="button" onClick={onCancelEdit}>
+                <X size={15} /> 取消
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="message-action-button" type="button" title="编辑消息" onClick={onEdit}>
+                <Pencil size={13} />
+              </button>
+              <button className="message-action-button" type="button" title="复制消息" onClick={() => onCopyText(message.content)}>
+                <Clipboard size={13} />
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </article>
   );
@@ -1717,10 +2432,12 @@ function ReasoningPanel({
   message,
   open,
   onOpenChange,
+  onCopyText,
 }: {
   message: ChatMessage;
   open: boolean;
   onOpenChange: () => void;
+  onCopyText: (text: string) => void;
 }) {
   const isThinking = message.status === "streaming" && !message.reasoningEndedAt;
   return (
@@ -1731,7 +2448,7 @@ function ReasoningPanel({
       </button>
       {open && (
         <div className="reasoning-content">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={createMarkdownComponents(onCopyText)}>
             {message.reasoningContent || ""}
           </ReactMarkdown>
         </div>
@@ -1816,26 +2533,28 @@ function ModelRow({
   );
 }
 
-const markdownComponents: Components = {
-  pre({ children }) {
-    const text = extractText(children);
-    return (
-      <div className="code-block">
-        <button className="code-copy" type="button" title="复制代码" onClick={() => copyText(text)}>
-          <Clipboard size={14} />
-        </button>
-        <pre>{children}</pre>
-      </div>
-    );
-  },
-  a({ children, href }) {
-    return (
-      <a href={href} target="_blank" rel="noreferrer">
-        {children}
-      </a>
-    );
-  },
-};
+function createMarkdownComponents(onCopyText: (text: string) => void): Components {
+  return {
+    pre({ children }) {
+      const text = extractText(children);
+      return (
+        <div className="code-block">
+          <button className="code-copy" type="button" title="复制代码" onClick={() => onCopyText(text)}>
+            <Clipboard size={14} />
+          </button>
+          <pre>{children}</pre>
+        </div>
+      );
+    },
+    a({ children, href }) {
+      return (
+        <a href={href} target="_blank" rel="noreferrer">
+          {children}
+        </a>
+      );
+    },
+  };
+}
 
 function findChat(workspace: Workspace, chatId: string) {
   return [workspace.defaultGroup, ...workspace.groups]
@@ -1980,8 +2699,11 @@ function extractText(node: ReactNode): string {
   return "";
 }
 
-function copyText(text: string) {
-  void navigator.clipboard?.writeText(text);
+async function copyText(text: string) {
+  if (!navigator.clipboard) {
+    throw new Error("当前浏览器不支持剪贴板写入。");
+  }
+  await navigator.clipboard.writeText(text);
 }
 
 function getChatPreview(chat: ChatSession) {
@@ -2017,6 +2739,18 @@ function formatReasoningDuration(message: ChatMessage) {
     return "1秒";
   }
   return `${Math.max(1, Math.round((endedAt - startedAt) / 1000))}秒`;
+}
+
+function formatMessageTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const pad = (unit: number) => String(unit).padStart(2, "0");
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+  ].join(" ");
 }
 
 function formatDate(value: string) {
