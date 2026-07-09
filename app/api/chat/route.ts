@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { validateApiMutationRequest } from "../../lib/api-security";
+import { buildChatProviderRequestBody } from "../../lib/model-call-parameters";
 import { getProvider, getProviderAuthHeader } from "../../lib/providers";
 import { CompletionMessage } from "../../lib/types";
 
@@ -59,7 +60,13 @@ export async function POST(request: Request) {
         ...authHeader,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(buildProviderRequestBody(body)),
+      body: JSON.stringify(
+        buildChatProviderRequestBody({
+          model: body.model,
+          messages: body.messages,
+          enableThinking: body.enableThinking,
+        }),
+      ),
       signal: request.signal,
     });
 
@@ -112,21 +119,6 @@ function validateBody(body: ChatRequest) {
     return "Messages must include role and content.";
   }
   return null;
-}
-
-function buildProviderRequestBody(body: ChatRequest) {
-  return {
-    model: body.model,
-    messages: body.messages,
-    stream: true,
-    ...(body.enableThinking
-      ? {
-          chat_template_kwargs: { enable_thinking: true },
-          separate_reasoning: true,
-          stream_reasoning: true,
-        }
-      : {}),
-  };
 }
 
 function streamProviderDeltas(body: ReadableStream<Uint8Array>) {

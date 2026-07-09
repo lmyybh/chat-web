@@ -161,7 +161,42 @@ describe("/api/chat", () => {
     expect(text).toContain('data: {"delta":"answer","reasoningDelta":""}');
   });
 
-  it("forwards enable_thinking only when deep thinking is enabled", async () => {
+  it("streams provider reasoning deltas even when deep thinking is disabled", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
+    const encoder = new TextEncoder();
+    const providerStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"reasoning_content":"provider think"}}]}\n\ndata: {"choices":[{"delta":{"content":"answer"}}]}\n\ndata: [DONE]\n\n',
+          ),
+        );
+        controller.close();
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(providerStream, { status: 200 })));
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "openai",
+          model: "DeepSeek/deepseek-v4-pro",
+          messages: [{ role: "user", content: "hello" }],
+          enableThinking: false,
+        }),
+      }),
+    );
+
+    const text = await response.text();
+    expect(text).toContain('data: {"delta":"","reasoningDelta":"provider think"}');
+    expect(text).toContain('data: {"delta":"answer","reasoningDelta":""}');
+  });
+
+  it("forwards unified thinking parameters when deep thinking is enabled", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
     const headers = await createSessionJsonHeaders();
@@ -185,10 +220,77 @@ describe("/api/chat", () => {
 
     const providerInit = fetchMock.mock.calls[0][1] as RequestInit;
     expect(JSON.parse(String(providerInit.body))).toMatchObject({
+      enable_thinking: true,
       chat_template_kwargs: { enable_thinking: true },
-      separate_reasoning: true,
-      stream_reasoning: true,
     });
+  });
+
+  it("forwards unified thinking parameters when deep thinking is disabled", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(providerDoneStream(), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "openai",
+          model: "qwen3",
+          messages: [{ role: "user", content: "hello" }],
+          enableThinking: false,
+        }),
+      }),
+    );
+
+    const providerInit = fetchMock.mock.calls[0][1] as RequestInit;
+    const providerBody = JSON.parse(String(providerInit.body));
+    expect(providerBody).toMatchObject({
+      enable_thinking: false,
+      chat_template_kwargs: { enable_thinking: false },
+    });
+    expect(providerBody).not.toHaveProperty("reasoning_effort");
+    expect(providerBody).not.toHaveProperty("thinking");
+    expect(providerBody).not.toHaveProperty("separate_reasoning");
+    expect(providerBody).not.toHaveProperty("stream_reasoning");
+  });
+
+  it("uses the same thinking parameters for deepseek-v4-pro", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_COMPATIBLE_PROVIDERS", "");
+    const headers = await createSessionJsonHeaders();
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(providerDoneStream(), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "openai",
+          model: "DeepSeek/deepseek-v4-pro",
+          messages: [{ role: "user", content: "hello" }],
+          enableThinking: false,
+        }),
+      }),
+    );
+
+    const providerInit = fetchMock.mock.calls[0][1] as RequestInit;
+    const providerBody = JSON.parse(String(providerInit.body));
+    expect(providerBody).toMatchObject({
+      model: "DeepSeek/deepseek-v4-pro",
+      enable_thinking: false,
+      chat_template_kwargs: { enable_thinking: false },
+    });
+    expect(providerBody).not.toHaveProperty("rid");
+    expect(providerBody).not.toHaveProperty("thinking");
+    expect(providerBody).not.toHaveProperty("reasoning_effort");
   });
 
   it("does not forward chat_template_kwargs by default", async () => {
