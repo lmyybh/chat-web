@@ -27,6 +27,18 @@ import {
   User,
   X,
 } from "lucide-react";
+import hljs from "highlight.js/lib/core";
+import bashLanguage from "highlight.js/lib/languages/bash";
+import cssLanguage from "highlight.js/lib/languages/css";
+import javascriptLanguage from "highlight.js/lib/languages/javascript";
+import jsonLanguage from "highlight.js/lib/languages/json";
+import markdownLanguage from "highlight.js/lib/languages/markdown";
+import pythonLanguage from "highlight.js/lib/languages/python";
+import shellLanguage from "highlight.js/lib/languages/shell";
+import sqlLanguage from "highlight.js/lib/languages/sql";
+import typescriptLanguage from "highlight.js/lib/languages/typescript";
+import xmlLanguage from "highlight.js/lib/languages/xml";
+import yamlLanguage from "highlight.js/lib/languages/yaml";
 import { CSSProperties, FormEvent, ReactNode, RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -72,6 +84,23 @@ type ConfirmDialogState = {
 };
 
 const LAST_MODEL_KEY = "chat-web:last-model";
+
+hljs.registerLanguage("bash", bashLanguage);
+hljs.registerLanguage("css", cssLanguage);
+hljs.registerLanguage("javascript", javascriptLanguage);
+hljs.registerLanguage("json", jsonLanguage);
+hljs.registerLanguage("markdown", markdownLanguage);
+hljs.registerLanguage("python", pythonLanguage);
+hljs.registerLanguage("shell", shellLanguage);
+hljs.registerLanguage("sql", sqlLanguage);
+hljs.registerLanguage("typescript", typescriptLanguage);
+hljs.registerLanguage("xml", xmlLanguage);
+hljs.registerLanguage("yaml", yamlLanguage);
+hljs.registerAliases(["js", "jsx"], { languageName: "javascript" });
+hljs.registerAliases(["ts", "tsx"], { languageName: "typescript" });
+hljs.registerAliases(["html", "svg"], { languageName: "xml" });
+hljs.registerAliases(["sh", "zsh"], { languageName: "bash" });
+hljs.registerAliases(["yml"], { languageName: "yaml" });
 
 function readViewFromCurrentUrl(): View {
   if (typeof window === "undefined") {
@@ -2546,6 +2575,20 @@ function createMarkdownComponents(onCopyText: (text: string) => void): Component
         </div>
       );
     },
+    code({ children, className }) {
+      const code = extractText(children).replace(/\n$/, "");
+      const language = extractCodeLanguage(className);
+      if (!language && !code.includes("\n")) {
+        return <code className={className}>{children}</code>;
+      }
+      const highlighted = highlightCode(code, language);
+      return (
+        <code
+          className={language ? `hljs language-${language}` : "hljs"}
+          dangerouslySetInnerHTML={{ __html: highlighted }}
+        />
+      );
+    },
     a({ children, href }) {
       return (
         <a href={href} target="_blank" rel="noreferrer">
@@ -2554,6 +2597,21 @@ function createMarkdownComponents(onCopyText: (text: string) => void): Component
       );
     },
   };
+}
+
+function extractCodeLanguage(className?: string) {
+  return className
+    ?.split(/\s+/)
+    .find((name) => name.startsWith("language-"))
+    ?.replace("language-", "")
+    .toLowerCase();
+}
+
+function highlightCode(code: string, language?: string) {
+  if (language && hljs.getLanguage(language)) {
+    return hljs.highlight(code, { language, ignoreIllegals: true }).value;
+  }
+  return hljs.highlightAuto(code).value;
 }
 
 function findChat(workspace: Workspace, chatId: string) {

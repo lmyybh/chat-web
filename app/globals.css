@@ -1066,6 +1066,56 @@ select:focus {
   padding: 0;
 }
 
+.code-block .hljs {
+  display: block;
+  color: #eef3f9;
+}
+
+.code-block .hljs-comment,
+.code-block .hljs-quote {
+  color: #7f8ea3;
+}
+
+.code-block .hljs-keyword,
+.code-block .hljs-selector-tag,
+.code-block .hljs-subst {
+  color: #7dd3fc;
+}
+
+.code-block .hljs-string,
+.code-block .hljs-title,
+.code-block .hljs-name,
+.code-block .hljs-type,
+.code-block .hljs-attribute,
+.code-block .hljs-symbol,
+.code-block .hljs-bullet,
+.code-block .hljs-addition,
+.code-block .hljs-variable,
+.code-block .hljs-template-tag,
+.code-block .hljs-template-variable {
+  color: #a7f3d0;
+}
+
+.code-block .hljs-number,
+.code-block .hljs-literal,
+.code-block .hljs-selector-id,
+.code-block .hljs-selector-class,
+.code-block .hljs-regexp,
+.code-block .hljs-meta {
+  color: #fbbf24;
+}
+
+.code-block .hljs-built_in,
+.code-block .hljs-builtin-name,
+.code-block .hljs-function,
+.code-block .hljs-section {
+  color: #c4b5fd;
+}
+
+.code-block .hljs-deletion {
+  color: #fca5a5;
+}
+
 .code-copy,
 .inline-icon-button {
   border-radius: 8px;
@@ -1160,17 +1210,18 @@ select:focus {
 
 .copy-toast {
   position: fixed;
-  right: 24px;
-  bottom: 24px;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 120;
-  border: 1px solid var(--line);
+  border: 1px solid #86d39a;
   border-radius: 8px;
-  background: var(--text);
-  color: #fff;
+  background: #ecfdf3;
+  color: #16723a;
   padding: 9px 12px;
   font-size: 13px;
   font-weight: 650;
-  box-shadow: var(--shadow);
+  box-shadow: 0 12px 32px rgba(22, 114, 58, 0.16);
 }
 
 .message-error {
