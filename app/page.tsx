@@ -11,7 +11,6 @@ import {
   Check,
   ChevronDown,
   Clipboard,
-  Cpu,
   KeyRound,
   Menu,
   MessageSquarePlus,
@@ -55,7 +54,8 @@ import {
 } from "./lib/types";
 
 type View = { type: "home" } | { type: "group"; groupId: string } | { type: "chat"; chatId: string };
-type SettingsTab = "general" | "providers" | "models";
+type SettingsTab = "providers" | "chat";
+type ProviderDetailMode = "view" | "create";
 
 type PendingChat = {
   status: "streaming" | "error";
@@ -135,6 +135,11 @@ function getCurrentPathWithSearch() {
   return `${window.location.pathname}${window.location.search}${window.location.hash}`;
 }
 
+function normalizeBaseURLDraft(value: string) {
+  const trimmed = value.trim();
+  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+}
+
 export default function Home() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [providers, setProviders] = useState<PublicProvider[]>([]);
@@ -145,7 +150,7 @@ export default function Home() {
   const [pendingByChat, setPendingByChat] = useState<Record<string, PendingChat>>({});
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
   const [lastModelId, setLastModelId] = useState("");
   const [groupFormOpen, setGroupFormOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState("");
@@ -156,20 +161,22 @@ export default function Home() {
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
 
-  const [modelFormOpen, setModelFormOpen] = useState(false);
+  const [modelFormProviderId, setModelFormProviderId] = useState<string | null>(null);
   const [modelName, setModelName] = useState("");
   const [modelId, setModelId] = useState("");
-  const [providerId, setProviderId] = useState("");
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
   const [editingModelName, setEditingModelName] = useState("");
   const [editingModelModel, setEditingModelModel] = useState("");
-  const [editingModelProviderId, setEditingModelProviderId] = useState("");
 
-  const [providerFormOpen, setProviderFormOpen] = useState(false);
+  const [selectedProviderId, setSelectedProviderId] = useState("");
+  const [providerDetailMode, setProviderDetailMode] = useState<ProviderDetailMode>("view");
   const [newProviderId, setNewProviderId] = useState("");
   const [newProviderName, setNewProviderName] = useState("");
   const [newProviderBaseURL, setNewProviderBaseURL] = useState("");
   const [newProviderApiKey, setNewProviderApiKey] = useState("");
+  const [providerNameDraft, setProviderNameDraft] = useState("");
+  const [providerBaseURLDraft, setProviderBaseURLDraft] = useState("");
+  const [providerApiKeyDraft, setProviderApiKeyDraft] = useState("");
 
   const abortControllers = useRef(new Map<string, AbortController>());
   const streamContent = useRef(new Map<string, string>());
@@ -233,8 +240,19 @@ export default function Home() {
     if (!workspace?.models.length) {
       return null;
     }
-    return workspace.models.find((model) => model.id === lastModelId) ?? workspace.models[0];
-  }, [lastModelId, workspace]);
+    const modelId = activeChat?.modelId || lastModelId;
+    return workspace.models.find((model) => model.id === modelId) ?? workspace.models[0];
+  }, [activeChat?.modelId, lastModelId, workspace]);
+  const selectedProvider = useMemo(
+    () => providers.find((provider) => provider.id === selectedProviderId) ?? providers[0] ?? null,
+    [providers, selectedProviderId],
+  );
+  const selectedProviderModels = useMemo(() => {
+    if (!workspace || !selectedProvider) {
+      return [];
+    }
+    return workspace.models.filter((model) => model.providerId === selectedProvider.id);
+  }, [selectedProvider, workspace]);
   const activePending = activeChat ? pendingByChat[activeChat.id] : undefined;
 
   useEffect(() => {
@@ -310,10 +328,27 @@ export default function Home() {
   }, [workspace?.defaultGroup.systemPrompt]);
 
   useEffect(() => {
-    if (!providerId && providers[0]) {
-      setProviderId(providers[0].id);
+    if (providerDetailMode === "create") {
+      return;
     }
-  }, [providerId, providers]);
+    if (!providers.length) {
+      setSelectedProviderId("");
+      return;
+    }
+    if (!selectedProviderId || !providers.some((provider) => provider.id === selectedProviderId)) {
+      setSelectedProviderId(providers[0].id);
+    }
+  }, [providerDetailMode, providers, selectedProviderId]);
+
+  useEffect(() => {
+    const provider = providers.find((item) => item.id === selectedProviderId);
+    if (!provider || providerDetailMode === "create") {
+      return;
+    }
+    setProviderNameDraft(provider.name);
+    setProviderBaseURLDraft(provider.baseURL);
+    setProviderApiKeyDraft("");
+  }, [providerDetailMode, providers, selectedProviderId]);
 
   function navigateToView(nextView: View, mode: "push" | "replace" = "push") {
     nextUrlSyncMode.current = mode;
@@ -335,6 +370,17 @@ export default function Home() {
     }
     setWorkspace(workspaceData.workspace);
     setProviders(providersData.providers ?? []);
+  }
+
+  async function loadWorkspace() {
+    const requestId = ++workspaceRequestSeq.current;
+    const response = await fetch("/api/workspace");
+    const data = (await response.json()) as WorkspaceResponse;
+    if (!response.ok || data.error) {
+      throw new Error(data.error || "Failed to load workspace.");
+    }
+    applyWorkspaceSnapshot(data.workspace, requestId);
+    return data;
   }
 
   async function loadProviders() {
@@ -364,7 +410,7 @@ export default function Home() {
   }
 
   async function runProviderAction(
-    method: "POST" | "DELETE",
+    method: "POST" | "PUT" | "DELETE",
     payload?: Record<string, unknown>,
     providerIdToDelete?: string,
   ) {
@@ -710,7 +756,9 @@ export default function Home() {
     setLastModelId(modelId);
     window.localStorage.setItem(LAST_MODEL_KEY, modelId);
     if (activeChat) {
-      void runWorkspaceAction({ type: "setChatModel", chatId: activeChat.id, modelId });
+      void runWorkspaceAction({ type: "setChatModel", chatId: activeChat.id, modelId }).catch((error) =>
+        showUiError(error, "模型切换失败。"),
+      );
     }
   }
 
@@ -883,20 +931,25 @@ export default function Home() {
     }
   }
 
-  async function handleAddModel(event: FormEvent) {
+  async function handleAddModel(event: FormEvent, targetProviderId: string) {
     event.preventDefault();
-    if (!modelName.trim() || !modelId.trim() || !providerId) {
+    if (!modelName.trim() || !modelId.trim()) {
       return;
     }
-    await runWorkspaceAction({
-      type: "createModel",
-      name: modelName,
-      model: modelId,
-      providerId,
-    });
-    setModelName("");
-    setModelId("");
-    setModelFormOpen(false);
+    try {
+      await runWorkspaceAction({
+        type: "createModel",
+        name: modelName,
+        model: modelId,
+        providerId: targetProviderId,
+      });
+      setModelName("");
+      setModelId("");
+      setModelFormProviderId(null);
+      setUiError(null);
+    } catch (error) {
+      showUiError(error, "模型保存失败。");
+    }
   }
 
   async function handleAddProvider(event: FormEvent) {
@@ -915,7 +968,33 @@ export default function Home() {
       setNewProviderName("");
       setNewProviderBaseURL("");
       setNewProviderApiKey("");
-      setProviderFormOpen(false);
+      setSelectedProviderId(newProviderId.trim());
+      setProviderDetailMode("view");
+      setUiError(null);
+    } catch (error) {
+      showUiError(error, "供应商保存失败。");
+    }
+  }
+
+  async function saveProviderDraft(provider: PublicProvider) {
+    if (!providerNameDraft.trim() || !providerBaseURLDraft.trim()) {
+      return;
+    }
+    const hasChanges =
+      providerNameDraft.trim() !== provider.name ||
+      normalizeBaseURLDraft(providerBaseURLDraft) !== provider.baseURL ||
+      Boolean(providerApiKeyDraft.trim());
+    if (!hasChanges) {
+      return;
+    }
+    try {
+      await runProviderAction("PUT", {
+        id: provider.id,
+        name: providerNameDraft,
+        baseURL: providerBaseURLDraft,
+        apiKey: providerApiKeyDraft,
+      });
+      setProviderApiKeyDraft("");
       setUiError(null);
     } catch (error) {
       showUiError(error, "供应商保存失败。");
@@ -923,16 +1002,31 @@ export default function Home() {
   }
 
   async function handleDeleteProvider(provider: PublicProvider) {
+    const providerModels = workspace?.models.filter((model) => model.providerId === provider.id) ?? [];
     setConfirmDialog({
       title: "删除供应商",
-      description: `将删除“${provider.name}”。如果仍有模型依赖它，服务端会拒绝删除。`,
+      description: `将删除“${provider.name}”及其下 ${providerModels.length} 个模型。已使用这些模型的对话会自动迁移到剩余模型之一。`,
       confirmLabel: "删除供应商",
       tone: "danger",
       onConfirm: async () => {
+        if ((workspace?.models.some((model) => model.providerId !== provider.id) ?? false) === false) {
+          throw new Error("至少需要保留一个其他供应商下的模型。");
+        }
         await runProviderAction("DELETE", undefined, provider.id);
-        const nextProviders = await loadProviders();
-        if (providerId === provider.id) {
-          setProviderId(nextProviders[0]?.id || "");
+        await loadProviders();
+        const nextWorkspaceResponse = await loadWorkspace();
+        setModelFormProviderId((current) => (current === provider.id ? null : current));
+        setProviderDetailMode("view");
+        setSelectedProviderId((current) => {
+          if (current !== provider.id) {
+            return current;
+          }
+          return nextWorkspaceResponse.workspace.models[0]?.providerId || "";
+        });
+        const fallback = nextWorkspaceResponse.workspace.models[0];
+        if (fallback && !nextWorkspaceResponse.workspace.models.some((model) => model.id === lastModelId)) {
+          setLastModelId(fallback.id);
+          window.localStorage.setItem(LAST_MODEL_KEY, fallback.id);
         }
       },
     });
@@ -940,20 +1034,25 @@ export default function Home() {
 
   async function handleUpdateModel(event: FormEvent) {
     event.preventDefault();
-    if (!editingModelId || !editingModelName.trim() || !editingModelModel.trim() || !editingModelProviderId) {
+    const currentModel = workspace?.models.find((model) => model.id === editingModelId);
+    if (!editingModelId || !editingModelName.trim() || !editingModelModel.trim() || !currentModel) {
       return;
     }
-    await runWorkspaceAction({
-      type: "updateModel",
-      modelId: editingModelId,
-      name: editingModelName,
-      model: editingModelModel,
-      providerId: editingModelProviderId,
-    });
-    setEditingModelId(null);
-    setEditingModelName("");
-    setEditingModelModel("");
-    setEditingModelProviderId("");
+    try {
+      await runWorkspaceAction({
+        type: "updateModel",
+        modelId: editingModelId,
+        name: editingModelName,
+        model: editingModelModel,
+        providerId: currentModel.providerId,
+      });
+      setEditingModelId(null);
+      setEditingModelName("");
+      setEditingModelModel("");
+      setUiError(null);
+    } catch (error) {
+      showUiError(error, "模型保存失败。");
+    }
   }
 
   function handleDeleteModel(model: ModelConfig) {
@@ -982,7 +1081,6 @@ export default function Home() {
     setEditingModelId(model.id);
     setEditingModelName(model.name);
     setEditingModelModel(model.model);
-    setEditingModelProviderId(model.providerId);
   }
 
   if (!workspace || !selectedModel) {
@@ -1111,7 +1209,6 @@ export default function Home() {
               <button className="icon-button mobile-menu-button" title="导航" onClick={() => setSidebarOpen(true)}>
                 <Menu size={18} />
               </button>
-              <ModelSelect models={workspace.models} selectedModelId={selectedModel.id} onModelChange={handleModelChange} />
             </div>
 
             <div className="header-actions">
@@ -1187,10 +1284,14 @@ export default function Home() {
 
           <Composer
             draft={draft}
+            models={workspace.models}
+            providers={providers}
+            selectedModelId={selectedModel.id}
             selectedModelName={selectedModel.name}
             streaming={activeChat ? activePending?.status === "streaming" : false}
             deepThinkingEnabled={deepThinkingEnabled}
             onDraftChange={setDraft}
+            onModelChange={handleModelChange}
             onDeepThinkingChange={setDeepThinkingEnabled}
             onSubmit={handleSend}
             onStop={() => activeChat && stopChat(activeChat.id)}
@@ -1203,39 +1304,85 @@ export default function Home() {
             <Dialog.Content className="settings-dialog">
               <aside className="settings-nav">
                 <Dialog.Title className="settings-heading">设置</Dialog.Title>
-                <Dialog.Description className="settings-description">
-                  管理本地提示词、供应商和模型。
-                </Dialog.Description>
-                <SettingsNavButton
-                  active={settingsTab === "general"}
-                  icon={<Settings2 size={17} />}
-                  label="通用"
-                  onClick={() => setSettingsTab("general")}
-                />
+                <Dialog.Description className="settings-description">管理模型提供方和默认对话行为。</Dialog.Description>
                 <SettingsNavButton
                   active={settingsTab === "providers"}
                   icon={<KeyRound size={17} />}
-                  label="供应商"
-                  onClick={() => setSettingsTab("providers")}
+                  label="模型提供方"
+                  onClick={() => {
+                    setSettingsTab("providers");
+                    setProviderDetailMode("view");
+                  }}
                 />
                 <SettingsNavButton
-                  active={settingsTab === "models"}
-                  icon={<Cpu size={17} />}
-                  label="模型"
-                  onClick={() => setSettingsTab("models")}
+                  active={settingsTab === "chat"}
+                  icon={<Settings2 size={17} />}
+                  label="对话设置"
+                  onClick={() => setSettingsTab("chat")}
                 />
               </aside>
 
-              <section className="settings-panel">
+              {settingsTab === "providers" && (
+                <aside className="settings-provider-list">
+                  <div className="settings-column-header">
+                    <span>模型提供方</span>
+                    <button
+                      className="icon-button"
+                      type="button"
+                      title="添加供应商"
+                      onClick={() => {
+                        setProviderDetailMode("create");
+                        setSelectedProviderId("");
+                        setNewProviderId("");
+                        setNewProviderName("");
+                        setNewProviderBaseURL("");
+                        setNewProviderApiKey("");
+                        setEditingModelId(null);
+                        setModelFormProviderId(null);
+                      }}
+                    >
+                      <Plus size={16} />
+                    </button>
+                  </div>
+                  <div className="provider-picker-list">
+                    {providers.length === 0 ? (
+                      <div className="empty-inline">还没有供应商。</div>
+                    ) : (
+                      providers.map((provider) => (
+                        <button
+                          key={provider.id}
+                          className={
+                            providerDetailMode === "view" && selectedProvider?.id === provider.id
+                              ? "provider-picker-item active"
+                              : "provider-picker-item"
+                          }
+                          type="button"
+                          onClick={() => {
+                            setProviderDetailMode("view");
+                            setSelectedProviderId(provider.id);
+                            setEditingModelId(null);
+                            setModelFormProviderId(null);
+                          }}
+                        >
+                          <ProviderAvatar name={provider.name} />
+                          <span>{provider.name}</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </aside>
+              )}
+
+              <section className={settingsTab === "providers" ? "settings-panel provider-settings-panel" : "settings-panel chat-settings-panel"}>
                 <button className="dialog-close" type="button" title="关闭设置" onClick={() => setSettingsOpen(false)}>
                   <X size={18} />
                 </button>
 
-                {settingsTab === "general" && (
+                {settingsTab === "chat" && (
                   <div className="settings-content">
                     <div className="settings-panel-header">
                       <div>
-                        <h2>通用</h2>
+                        <h2>对话设置</h2>
                         <p>配置新对话默认使用的系统提示词。</p>
                       </div>
                     </div>
@@ -1256,109 +1403,143 @@ export default function Home() {
                 )}
 
                 {settingsTab === "providers" && (
-                  <div className="settings-content">
-                    <div className="settings-panel-header">
-                      <div>
-                        <h2>供应商</h2>
-                        <p>API key 只保存在本地 SQLite，不返回给浏览器。</p>
-                      </div>
-                      <button className="text-button" type="button" onClick={() => setProviderFormOpen((open) => !open)}>
-                        <Plus size={16} />
-                        添加
-                      </button>
-                    </div>
-
-                    {providerFormOpen && (
-                      <form className="model-form" onSubmit={handleAddProvider}>
-                        <input placeholder="供应商 ID" value={newProviderId} onChange={(event) => setNewProviderId(event.target.value)} />
-                        <input placeholder="显示名称" value={newProviderName} onChange={(event) => setNewProviderName(event.target.value)} />
-                        <input placeholder="Base URL" value={newProviderBaseURL} onChange={(event) => setNewProviderBaseURL(event.target.value)} />
-                        <input
-                          type="password"
-                          placeholder="API key，可选"
-                          value={newProviderApiKey}
-                          onChange={(event) => setNewProviderApiKey(event.target.value)}
-                          autoComplete="new-password"
-                        />
-                        <button className="primary-button">添加供应商</button>
-                      </form>
-                    )}
-
-                    <div className="provider-list">
-                      {providers.length === 0 ? (
-                        <div className="empty-inline">还没有供应商。添加一个供应商后即可配置模型。</div>
-                      ) : (
-                        providers.map((provider) => (
-                          <div key={provider.id} className="provider-row">
-                            <div className="provider-name">
-                              <strong>{provider.name}</strong>
-                              <span>{provider.baseURL}</span>
-                              <small>{provider.hasApiKey ? "API key 已保存" : "未配置 API key"}</small>
-                            </div>
-                            <TooltipIconButton label="删除供应商" tone="danger" onClick={() => handleDeleteProvider(provider)}>
-                              <Trash2 size={15} />
-                            </TooltipIconButton>
+                  <div className="settings-content provider-detail-content">
+                    {providerDetailMode === "create" ? (
+                      <>
+                        <div className="settings-panel-header">
+                          <div>
+                            <h2>新建供应商</h2>
+                            <p>供应商 ID 创建后不可修改。</p>
                           </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                )}
+                        </div>
+                        <form className="settings-form" onSubmit={handleAddProvider}>
+                          <label className="field-block">
+                            <span>供应商 ID</span>
+                            <input value={newProviderId} onChange={(event) => setNewProviderId(event.target.value)} />
+                          </label>
+                          <label className="field-block">
+                            <span>名称</span>
+                            <input value={newProviderName} onChange={(event) => setNewProviderName(event.target.value)} />
+                          </label>
+                          <label className="field-block">
+                            <span>Base URL</span>
+                            <input value={newProviderBaseURL} onChange={(event) => setNewProviderBaseURL(event.target.value)} />
+                          </label>
+                          <label className="field-block">
+                            <span>API Key</span>
+                            <input
+                              type="password"
+                              value={newProviderApiKey}
+                              onChange={(event) => setNewProviderApiKey(event.target.value)}
+                              autoComplete="new-password"
+                            />
+                          </label>
+                          <div className="settings-form-actions">
+                            <button className="text-button muted" type="button" onClick={() => setProviderDetailMode("view")}>
+                              取消
+                            </button>
+                            <button className="primary-button" type="submit">
+                              保存
+                            </button>
+                          </div>
+                        </form>
+                      </>
+                    ) : selectedProvider ? (
+                      <>
+                        <div className="settings-panel-header provider-detail-header">
+                          <div>
+                            <h2>{selectedProvider.name}</h2>
+                            <p>ID: {selectedProvider.id}</p>
+                          </div>
+                          <TooltipIconButton label="删除供应商" tone="danger" onClick={() => handleDeleteProvider(selectedProvider)}>
+                            <Trash2 size={16} />
+                          </TooltipIconButton>
+                        </div>
 
-                {settingsTab === "models" && (
-                  <div className="settings-content">
-                    <div className="settings-panel-header">
-                      <div>
-                        <h2>模型</h2>
-                        <p>选择和维护可用于新对话的模型。</p>
-                      </div>
-                      <button className="text-button" type="button" onClick={() => setModelFormOpen((open) => !open)}>
-                        <Plus size={16} />
-                        添加
-                      </button>
-                    </div>
+                        <div className="settings-form">
+                          <label className="field-block">
+                            <span>名称</span>
+                            <input
+                              value={providerNameDraft}
+                              onChange={(event) => setProviderNameDraft(event.target.value)}
+                              onBlur={() => void saveProviderDraft(selectedProvider)}
+                            />
+                          </label>
+                          <label className="field-block">
+                            <span>Base URL</span>
+                            <input
+                              value={providerBaseURLDraft}
+                              onChange={(event) => setProviderBaseURLDraft(event.target.value)}
+                              onBlur={() => void saveProviderDraft(selectedProvider)}
+                            />
+                          </label>
+                          <label className="field-block">
+                            <span>API Key</span>
+                            <input
+                              type="password"
+                              value={providerApiKeyDraft}
+                              onChange={(event) => setProviderApiKeyDraft(event.target.value)}
+                              onBlur={() => void saveProviderDraft(selectedProvider)}
+                              placeholder={selectedProvider.hasApiKey ? "已保存，留空不修改" : "未配置"}
+                              autoComplete="new-password"
+                            />
+                          </label>
+                        </div>
 
-                    {modelFormOpen && (
-                      <form className="model-form" onSubmit={handleAddModel}>
-                        <input placeholder="显示名称" value={modelName} onChange={(event) => setModelName(event.target.value)} />
-                        <input placeholder="模型 ID" value={modelId} onChange={(event) => setModelId(event.target.value)} />
-                        <select value={providerId} onChange={(event) => setProviderId(event.target.value)}>
-                          {providers.map((provider) => (
-                            <option key={provider.id} value={provider.id}>
-                              {provider.name}
-                            </option>
-                          ))}
-                        </select>
-                        <button className="primary-button">添加模型</button>
-                      </form>
+                        <div className="model-section">
+                          <div className="model-section-header">
+                            <h3>模型</h3>
+                            <button
+                              className="text-button compact"
+                              type="button"
+                              onClick={() => {
+                                setEditingModelId(null);
+                                setModelName("");
+                                setModelId("");
+                                setModelFormProviderId(modelFormProviderId === selectedProvider.id ? null : selectedProvider.id);
+                              }}
+                            >
+                              <Plus size={15} />
+                              新建
+                            </button>
+                          </div>
+
+                          {modelFormProviderId === selectedProvider.id && (
+                            <form className="model-form inline" onSubmit={(event) => handleAddModel(event, selectedProvider.id)}>
+                              <input placeholder="显示名称" value={modelName} onChange={(event) => setModelName(event.target.value)} />
+                              <input placeholder="模型 ID" value={modelId} onChange={(event) => setModelId(event.target.value)} />
+                              <button className="primary-button">添加模型</button>
+                            </form>
+                          )}
+
+                          <div className="model-list detail-model-list">
+                            {selectedProviderModels.length === 0 ? (
+                              <div className="empty-inline">还没有模型。</div>
+                            ) : (
+                              selectedProviderModels.map((model) => (
+                                <ModelRow
+                                  key={model.id}
+                                  model={model}
+                                  active={model.id === selectedModel.id}
+                                  editing={editingModelId === model.id}
+                                  editingName={editingModelName}
+                                  editingModel={editingModelModel}
+                                  onEditingNameChange={setEditingModelName}
+                                  onEditingModelChange={setEditingModelModel}
+                                  onSubmitEdit={handleUpdateModel}
+                                  onStartEdit={() => startEditingModel(model)}
+                                  onCancelEdit={() => setEditingModelId(null)}
+                                  onSelect={() => handleModelChange(model.id)}
+                                  onDelete={() => handleDeleteModel(model)}
+                                />
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="empty-inline">添加一个供应商后即可配置模型。</div>
                     )}
-
-                    <div className="model-list">
-                      {workspace.models.length === 0 ? (
-                        <div className="empty-inline">还没有模型。添加模型后即可开始对话。</div>
-                      ) : (
-                        workspace.models.map((model) => (
-                          <ModelRow
-                            key={model.id}
-                            model={model}
-                            active={model.id === selectedModel.id}
-                            providers={providers}
-                            editing={editingModelId === model.id}
-                            editingName={editingModelName}
-                            editingModel={editingModelModel}
-                            editingProviderId={editingModelProviderId}
-                            onEditingNameChange={setEditingModelName}
-                            onEditingModelChange={setEditingModelModel}
-                            onEditingProviderChange={setEditingModelProviderId}
-                            onSubmitEdit={handleUpdateModel}
-                            onStartEdit={() => startEditingModel(model)}
-                            onCancelEdit={() => setEditingModelId(null)}
-                            onSelect={() => handleModelChange(model.id)}
-                            onDelete={() => handleDeleteModel(model)}
-                          />
-                        ))
-                      )}
-                    </div>
                   </div>
                 )}
               </section>
@@ -1415,6 +1596,11 @@ function TooltipIconButton({
       </Tooltip.Portal>
     </Tooltip.Root>
   );
+}
+
+function ProviderAvatar({ name }: { name: string }) {
+  const label = name.trim().slice(0, 1).toUpperCase() || "?";
+  return <span className="provider-avatar">{label}</span>;
 }
 
 function ConfirmDialog({
@@ -1939,17 +2125,37 @@ function InstructionPopover({
 
 function ModelSelect({
   models,
+  providers,
   selectedModelId,
+  disabled,
   onModelChange,
 }: {
   models: ModelConfig[];
+  providers: PublicProvider[];
   selectedModelId: string;
+  disabled?: boolean;
   onModelChange: (modelId: string) => void;
 }) {
+  const selectedModel = models.find((model) => model.id === selectedModelId) ?? models[0];
+  const selectedProvider =
+    selectedModel && (providers.find((provider) => provider.id === selectedModel.providerId) ?? null);
+  const providerGroups = providers
+    .map((provider) => ({
+      provider,
+      models: models.filter((model) => model.providerId === provider.id),
+    }))
+    .filter((group) => group.models.length > 0);
+  const missingProviderModels = models.filter((model) => !providers.some((provider) => provider.id === model.providerId));
+
+  if (!selectedModel) {
+    return null;
+  }
+
   return (
-    <Select.Root value={selectedModelId} onValueChange={onModelChange}>
-      <Select.Trigger className="model-select-trigger" aria-label="选择模型">
-        <Select.Value />
+    <Select.Root value={selectedModel.id} onValueChange={onModelChange} disabled={disabled}>
+      <Select.Trigger className="model-select-trigger composer-model-trigger" aria-label="选择模型">
+        <ProviderAvatar name={selectedProvider?.name ?? selectedModel.providerId} />
+        <span className="composer-model-name">{selectedModel.name}</span>
         <Select.Icon>
           <ChevronDown size={15} />
         </Select.Icon>
@@ -1957,14 +2163,44 @@ function ModelSelect({
       <Select.Portal>
         <Select.Content className="select-content" position="popper" sideOffset={8}>
           <Select.Viewport className="select-viewport">
-            {models.map((model) => (
-              <Select.Item key={model.id} className="select-item" value={model.id}>
-                <Select.ItemText>{model.name}</Select.ItemText>
-                <Select.ItemIndicator className="select-item-indicator">
-                  <Check size={14} />
-                </Select.ItemIndicator>
-              </Select.Item>
+            {providerGroups.map(({ provider, models: providerModels }) => (
+              <Select.Group key={provider.id}>
+                <Select.Label className="select-group-label">{provider.name}</Select.Label>
+                {providerModels.map((model) => (
+                  <Select.Item key={model.id} className="select-item model-select-item" value={model.id}>
+                    <ProviderAvatar name={provider.name} />
+                    <Select.ItemText>
+                      <span className="model-select-item-text">
+                        <strong>{model.name}</strong>
+                        <small>{model.model}</small>
+                      </span>
+                    </Select.ItemText>
+                    <Select.ItemIndicator className="select-item-indicator">
+                      <Check size={14} />
+                    </Select.ItemIndicator>
+                  </Select.Item>
+                ))}
+              </Select.Group>
             ))}
+            {missingProviderModels.length > 0 && (
+              <Select.Group>
+                <Select.Label className="select-group-label">其他</Select.Label>
+                {missingProviderModels.map((model) => (
+                  <Select.Item key={model.id} className="select-item model-select-item" value={model.id}>
+                    <ProviderAvatar name={model.providerId} />
+                    <Select.ItemText>
+                      <span className="model-select-item-text">
+                        <strong>{model.name}</strong>
+                        <small>{model.model}</small>
+                      </span>
+                    </Select.ItemText>
+                    <Select.ItemIndicator className="select-item-indicator">
+                      <Check size={14} />
+                    </Select.ItemIndicator>
+                  </Select.Item>
+                ))}
+              </Select.Group>
+            )}
           </Select.Viewport>
         </Select.Content>
       </Select.Portal>
@@ -2294,19 +2530,27 @@ function isNearBottom(element: HTMLElement) {
 
 function Composer({
   draft,
+  models,
+  providers,
+  selectedModelId,
   selectedModelName,
   streaming,
   deepThinkingEnabled,
   onDraftChange,
+  onModelChange,
   onDeepThinkingChange,
   onSubmit,
   onStop,
 }: {
   draft: string;
+  models: ModelConfig[];
+  providers: PublicProvider[];
+  selectedModelId: string;
   selectedModelName: string;
   streaming: boolean;
   deepThinkingEnabled: boolean;
   onDraftChange: (draft: string) => void;
+  onModelChange: (modelId: string) => void;
   onDeepThinkingChange: (enabled: boolean) => void;
   onSubmit: (event: FormEvent) => void;
   onStop: () => void;
@@ -2326,26 +2570,37 @@ function Composer({
         }}
       />
       <div className="composer-toolbar">
-        <button
-          className={deepThinkingEnabled ? "thinking-toggle active" : "thinking-toggle"}
-          type="button"
-          aria-pressed={deepThinkingEnabled}
-          title={deepThinkingEnabled ? "关闭深度思考" : "开启深度思考"}
-          onClick={() => onDeepThinkingChange(!deepThinkingEnabled)}
-        >
-          <Brain size={16} />
-          深度思考
-        </button>
+        <div className="composer-toolbar-left">
+          <button
+            className={deepThinkingEnabled ? "thinking-toggle active" : "thinking-toggle"}
+            type="button"
+            aria-pressed={deepThinkingEnabled}
+            title={deepThinkingEnabled ? "关闭深度思考" : "开启深度思考"}
+            onClick={() => onDeepThinkingChange(!deepThinkingEnabled)}
+          >
+            <Brain size={16} />
+            深度思考
+          </button>
+        </div>
+        <div className="composer-toolbar-right">
+          <ModelSelect
+            models={models}
+            providers={providers}
+            selectedModelId={selectedModelId}
+            disabled={streaming}
+            onModelChange={onModelChange}
+          />
+          {streaming ? (
+            <button className="send-button stop" type="button" title="停止生成" onClick={onStop}>
+              <Square size={17} />
+            </button>
+          ) : (
+            <button className="send-button" disabled={!draft.trim()} title="发送">
+              <Send size={19} />
+            </button>
+          )}
+        </div>
       </div>
-      {streaming ? (
-        <button className="send-button stop" type="button" title="停止生成" onClick={onStop}>
-          <Square size={17} />
-        </button>
-      ) : (
-        <button className="send-button" disabled={!draft.trim()} title="发送">
-          <Send size={19} />
-        </button>
-      )}
     </form>
   );
 }
@@ -2489,14 +2744,11 @@ function ReasoningPanel({
 function ModelRow({
   model,
   active,
-  providers,
   editing,
   editingName,
   editingModel,
-  editingProviderId,
   onEditingNameChange,
   onEditingModelChange,
-  onEditingProviderChange,
   onSubmitEdit,
   onStartEdit,
   onCancelEdit,
@@ -2505,33 +2757,22 @@ function ModelRow({
 }: {
   model: ModelConfig;
   active: boolean;
-  providers: PublicProvider[];
   editing: boolean;
   editingName: string;
   editingModel: string;
-  editingProviderId: string;
   onEditingNameChange: (value: string) => void;
   onEditingModelChange: (value: string) => void;
-  onEditingProviderChange: (value: string) => void;
   onSubmitEdit: (event: FormEvent) => void;
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSelect: () => void;
   onDelete: () => void;
 }) {
-  const providerName = providers.find((provider) => provider.id === model.providerId)?.name ?? model.providerId;
   if (editing) {
     return (
       <form className="model-edit-row" onSubmit={onSubmitEdit}>
         <input placeholder="显示名称" value={editingName} onChange={(event) => onEditingNameChange(event.target.value)} />
         <input placeholder="模型 ID" value={editingModel} onChange={(event) => onEditingModelChange(event.target.value)} />
-        <select value={editingProviderId} onChange={(event) => onEditingProviderChange(event.target.value)}>
-          {providers.map((provider) => (
-            <option key={provider.id} value={provider.id}>
-              {provider.name}
-            </option>
-          ))}
-        </select>
         <div className="model-edit-actions">
           <button className="icon-button" title="保存模型">
             <Check size={15} />
@@ -2548,9 +2789,7 @@ function ModelRow({
     <div className={active ? "model-row active" : "model-row"}>
       <button className="model-name" type="button" onClick={onSelect}>
         <strong>{model.name}</strong>
-        <span>
-          {providerName} / {model.model}
-        </span>
+        <span>{model.model}</span>
       </button>
       <button className="icon-button" type="button" title="编辑模型" onClick={onStartEdit}>
         <Pencil size={15} />

@@ -18,6 +18,12 @@ export type NewProviderInput = {
   apiKey?: string | null;
 };
 
+export type UpdateProviderInput = {
+  name: string;
+  baseURL: string;
+  apiKey?: string | null;
+};
+
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 
 export function getProviders(): ProviderConfig[] {
@@ -55,21 +61,58 @@ export function createProvider(input: NewProviderInput) {
   return { providerId: provider.id };
 }
 
+export function updateProvider(providerId: string, input: UpdateProviderInput) {
+  ensureProviderSeedData();
+  const provider = normalizeProviderInput({
+    id: providerId,
+    name: input.name,
+    baseURL: input.baseURL,
+    apiKey: input.apiKey,
+  });
+  const existing = getProvider(provider.id);
+  if (!existing) {
+    throw new Error("Provider not found.");
+  }
+  if (input.apiKey?.trim()) {
+    getDb()
+      .prepare("UPDATE providers SET name = ?, base_url = ?, api_key = ?, api_key_env = NULL, updated_at = ? WHERE id = ?")
+      .run(provider.name, provider.baseURL, provider.apiKey, nowIso(), provider.id);
+  } else {
+    getDb()
+      .prepare("UPDATE providers SET name = ?, base_url = ?, updated_at = ? WHERE id = ?")
+      .run(provider.name, provider.baseURL, nowIso(), provider.id);
+  }
+  return { providerId: provider.id };
+}
+
 export function deleteProvider(providerId: string) {
   ensureProviderSeedData();
   const db = getDb();
-  const providerCount = db.prepare("SELECT COUNT(*) AS count FROM providers").get<{ count: number }>()?.count ?? 0;
-  if (providerCount <= 1) {
-    throw new Error("At least one provider must remain.");
-  }
-  const modelCount =
-    db.prepare("SELECT COUNT(*) AS count FROM models WHERE provider_id = ?").get<{ count: number }>(providerId)
-      ?.count ?? 0;
-  if (modelCount > 0) {
-    throw new Error("Delete or move models that use this provider first.");
-  }
-  db.prepare("DELETE FROM providers WHERE id = ?").run(providerId);
-  return { providerId };
+  return db.transaction(() => {
+    const providerCount = db.prepare("SELECT COUNT(*) AS count FROM providers").get<{ count: number }>()?.count ?? 0;
+    if (providerCount <= 1) {
+      throw new Error("At least one provider must remain.");
+    }
+
+    const models = db
+      .prepare("SELECT id FROM models WHERE provider_id = ? ORDER BY created_at ASC")
+      .all<{ id: string }>(providerId);
+    if (models.length > 0) {
+      const fallback = db
+        .prepare("SELECT id FROM models WHERE provider_id != ? ORDER BY created_at ASC LIMIT 1")
+        .get<{ id: string }>(providerId);
+      if (!fallback) {
+        throw new Error("At least one model from another provider must remain.");
+      }
+      db.prepare(
+        "UPDATE chats SET model_id = ?, updated_at = ? WHERE model_id IN (SELECT id FROM models WHERE provider_id = ?)",
+      ).run(fallback.id, nowIso(), providerId);
+      db.prepare("DELETE FROM models WHERE provider_id = ?").run(providerId);
+    }
+
+    db.prepare("DELETE FROM providers WHERE id = ?").run(providerId);
+    return { providerId };
+  })();
 }
 
 export function getProviderAuthHeader(provider: ProviderConfig): Record<string, string> {

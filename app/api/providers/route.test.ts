@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { API_SESSION_COOKIE, API_SESSION_HEADER } from "../../lib/api-session";
 import { resetDbConnectionForTests } from "../../lib/db";
 import { getDb } from "../../lib/db";
-import { DELETE, GET, POST } from "./route";
+import { createChat, createModel, getWorkspace } from "../../lib/repository";
+import { DELETE, GET, POST, PUT } from "./route";
 
 let tempDir = "";
 
@@ -75,6 +76,104 @@ describe("/api/providers", () => {
     expect(deleteResponse.status).toBe(200);
     const deleted = await deleteResponse.json();
     expect(deleted.providers.map((provider: { id: string }) => provider.id)).not.toContain("local");
+  });
+
+  it("deletes provider models and migrates chats to a remaining model", async () => {
+    const sessionHeaders = await createSessionHeaders();
+    await POST(
+      new Request("http://localhost/api/providers", {
+        method: "POST",
+        headers: sessionHeaders.json,
+        body: JSON.stringify({
+          id: "local",
+          name: "Local",
+          baseURL: "http://localhost:30000/v1",
+        }),
+      }),
+    );
+    const workspace = getWorkspace();
+    const fallbackModelId = workspace.models[0].id;
+    const localModel = createModel({
+      name: "Local Model",
+      model: "local-model",
+      providerId: "local",
+    });
+    const chat = createChat(undefined, localModel.modelId);
+
+    const deleteResponse = await DELETE(
+      new Request("http://localhost/api/providers?id=local", {
+        headers: sessionHeaders.session,
+      }),
+    );
+
+    expect(deleteResponse.status).toBe(200);
+    const nextWorkspace = getWorkspace();
+    expect(nextWorkspace.models.map((model) => model.id)).not.toContain(localModel.modelId);
+    expect(nextWorkspace.defaultGroup.chats.find((item) => item.id === chat.chatId)?.modelId).toBe(fallbackModelId);
+  });
+
+  it("updates editable provider fields without returning api keys", async () => {
+    const sessionHeaders = await createSessionHeaders();
+    await POST(
+      new Request("http://localhost/api/providers", {
+        method: "POST",
+        headers: sessionHeaders.json,
+        body: JSON.stringify({
+          id: "local",
+          name: "Local",
+          baseURL: "http://localhost:30000/v1",
+        }),
+      }),
+    );
+
+    const updateResponse = await PUT(
+      new Request("http://localhost/api/providers", {
+        method: "PUT",
+        headers: sessionHeaders.json,
+        body: JSON.stringify({
+          id: "local",
+          name: "Local Updated",
+          baseURL: "http://localhost:40000/v1/",
+          apiKey: "updated-secret",
+        }),
+      }),
+    );
+    const data = await updateResponse.json();
+
+    expect(updateResponse.status).toBe(200);
+    expect(data.providers).toContainEqual({
+      id: "local",
+      name: "Local Updated",
+      baseURL: "http://localhost:40000/v1",
+      hasApiKey: true,
+    });
+    expect(JSON.stringify(data)).not.toContain("updated-secret");
+  });
+
+  it("rejects deleting a provider when it would remove all models", async () => {
+    const sessionHeaders = await createSessionHeaders();
+    await POST(
+      new Request("http://localhost/api/providers", {
+        method: "POST",
+        headers: sessionHeaders.json,
+        body: JSON.stringify({
+          id: "empty",
+          name: "Empty",
+          baseURL: "http://localhost:30000/v1",
+        }),
+      }),
+    );
+    getWorkspace();
+
+    const deleteResponse = await DELETE(
+      new Request("http://localhost/api/providers?id=openai", {
+        headers: sessionHeaders.session,
+      }),
+    );
+    const data = await deleteResponse.json();
+
+    expect(deleteResponse.status).toBe(400);
+    expect(data.error).toBe("At least one model from another provider must remain.");
   });
 
   it("rejects cross-origin provider mutations", async () => {
