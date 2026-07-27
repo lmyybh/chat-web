@@ -53,7 +53,11 @@ import {
   Workspace,
 } from "./lib/types";
 
-type View = { type: "home" } | { type: "group"; groupId: string } | { type: "chat"; chatId: string };
+type View =
+  | { type: "home" }
+  | { type: "new"; groupId?: string }
+  | { type: "group"; groupId: string }
+  | { type: "chat"; chatId: string };
 type SettingsTab = "providers" | "chat";
 type ProviderDetailMode = "view" | "create";
 
@@ -471,7 +475,7 @@ export default function Home() {
     let chatId = activeChat?.id ?? "";
     let nextWorkspace = workspace;
     if (!chatId) {
-      const groupId = view.type === "group" ? view.groupId : undefined;
+      const groupId = view.type === "group" || view.type === "new" ? view.groupId : undefined;
       const created = await runWorkspaceAction<{ chatId: string }>({
         type: "createChat",
         groupId,
@@ -877,19 +881,10 @@ export default function Home() {
     }
   }
 
-  async function handleCreateChat(groupId?: string) {
-    if (!selectedModel) {
-      return;
-    }
-    const data = await runWorkspaceAction<{ chatId: string }>({
-      type: "createChat",
-      groupId,
-      modelId: selectedModel.id,
-    });
-    if (data.result) {
-      navigateToView({ type: "chat", chatId: data.result.chatId });
-      setSidebarOpen(false);
-    }
+  function handleCreateChat(groupId?: string) {
+    setDraft("");
+    navigateToView({ type: "new", groupId });
+    setSidebarOpen(false);
   }
 
   function handleDeleteChat(chat: ChatSession) {
@@ -1109,7 +1104,7 @@ export default function Home() {
           </div>
 
           <div className="new-chat-row">
-            <button className="new-chat-button" type="button" onClick={() => void handleCreateChat()}>
+            <button className="new-chat-button" type="button" onClick={() => handleCreateChat()}>
               <MessageSquarePlus size={17} />
               新建对话
             </button>
@@ -1221,7 +1216,7 @@ export default function Home() {
             </div>
           </header>
 
-          {view.type === "home" && <HomeView selectedModelName={selectedModel.name} />}
+          {(view.type === "home" || view.type === "new") && <HomeView selectedModelName={selectedModel.name} />}
 
           {view.type === "group" && activeGroup && (
             <GroupView
@@ -1236,7 +1231,7 @@ export default function Home() {
               }
               onError={(error) => showUiError(error, "分组设置保存失败。")}
               onDeleteGroup={() => void handleDeleteGroup(activeGroup)}
-              onCreateChat={() => void handleCreateChat(activeGroup.id)}
+              onCreateChat={() => handleCreateChat(activeGroup.id)}
               onOpenChat={(chatId) => navigateToView({ type: "chat", chatId })}
               groups={[workspace.defaultGroup, ...workspace.groups]}
               onRenameChat={handleRenameChat}
