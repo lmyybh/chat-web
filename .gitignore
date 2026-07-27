@@ -5,6 +5,7 @@ out
 dist
 .env
 .env*.local
+run.sh
 coverage
 *.tsbuildinfo
 data/*.sqlite

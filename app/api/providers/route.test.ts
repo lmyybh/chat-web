@@ -197,6 +197,51 @@ describe("/api/providers", () => {
     expect(response.status).toBe(403);
   });
 
+  it("accepts same-origin provider mutations forwarded by a reverse proxy", async () => {
+    const sessionHeaders = await createSessionHeaders();
+
+    const response = await POST(
+      new Request("http://127.0.0.1:6006/api/providers", {
+        method: "POST",
+        headers: {
+          ...sessionHeaders.json,
+          Origin: "https://gateway.example.test",
+          "X-Forwarded-Host": "gateway.example.test",
+          "X-Forwarded-Proto": "https",
+        },
+        body: JSON.stringify({
+          id: "local",
+          name: "Local",
+          baseURL: "http://localhost:30000/v1",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it("accepts a configured external origin when proxy forwarding headers are unavailable", async () => {
+    vi.stubEnv("CHAT_WEB_ALLOWED_ORIGINS", "https://gateway.example.test");
+    const sessionHeaders = await createSessionHeaders();
+
+    const response = await POST(
+      new Request("http://127.0.0.1:6006/api/providers", {
+        method: "POST",
+        headers: {
+          ...sessionHeaders.json,
+          Origin: "https://gateway.example.test",
+        },
+        body: JSON.stringify({
+          id: "local",
+          name: "Local",
+          baseURL: "http://localhost:30000/v1",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+  });
+
   it("keeps env-backed OpenAI keys out of SQLite while reporting availability", async () => {
     vi.stubEnv("OPENAI_API_KEY", "env-key");
     resetDbConnectionForTests();

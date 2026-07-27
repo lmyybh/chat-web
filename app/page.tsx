@@ -84,6 +84,7 @@ type ConfirmDialogState = {
 };
 
 const LAST_MODEL_KEY = "chat-web:last-model";
+const GATEWAY_PREFIX = normalizeGatewayPrefix(process.env.NEXT_PUBLIC_GATEWAY_PREFIX);
 
 hljs.registerLanguage("bash", bashLanguage);
 hljs.registerLanguage("css", cssLanguage);
@@ -357,8 +358,8 @@ export default function Home() {
 
   async function loadInitialData() {
     const [workspaceResponse, providersResponse] = await Promise.all([
-      fetch("/api/workspace"),
-      fetch("/api/providers"),
+      fetch(apiUrl("/api/workspace")),
+      fetch(apiUrl("/api/providers")),
     ]);
     const workspaceData = (await workspaceResponse.json()) as WorkspaceResponse;
     const providersData = (await providersResponse.json()) as ProvidersResponse;
@@ -374,7 +375,7 @@ export default function Home() {
 
   async function loadWorkspace() {
     const requestId = ++workspaceRequestSeq.current;
-    const response = await fetch("/api/workspace");
+    const response = await fetch(apiUrl("/api/workspace"));
     const data = (await response.json()) as WorkspaceResponse;
     if (!response.ok || data.error) {
       throw new Error(data.error || "Failed to load workspace.");
@@ -385,7 +386,7 @@ export default function Home() {
 
   async function loadProviders() {
     const requestId = ++providersRequestSeq.current;
-    const response = await fetch("/api/providers");
+    const response = await fetch(apiUrl("/api/providers"));
     const data = (await response.json()) as ProvidersResponse;
     if (!response.ok || data.error) {
       throw new Error(data.error || "Failed to load providers.");
@@ -396,7 +397,7 @@ export default function Home() {
 
   async function runWorkspaceAction<T>(action: Record<string, unknown>) {
     const requestId = ++workspaceRequestSeq.current;
-    const response = await fetchWithSessionRetry("/api/workspace", {
+    const response = await fetchWithSessionRetry(apiUrl("/api/workspace"), {
       method: "POST",
       headers: getJsonApiHeaders(),
       body: JSON.stringify(action),
@@ -416,7 +417,9 @@ export default function Home() {
   ) {
     const requestId = ++providersRequestSeq.current;
     const target =
-      method === "DELETE" ? `/api/providers?id=${encodeURIComponent(providerIdToDelete || "")}` : "/api/providers";
+      method === "DELETE"
+        ? apiUrl(`/api/providers?id=${encodeURIComponent(providerIdToDelete || "")}`)
+        : apiUrl("/api/providers");
     const response = await fetchWithSessionRetry(target, {
       method,
       headers: payload ? getJsonApiHeaders() : getApiSessionHeaders(),
@@ -556,7 +559,7 @@ export default function Home() {
     setPending(chatId, { status: "streaming" });
 
     try {
-      const response = await fetchWithSessionRetry("/api/chat", {
+      const response = await fetchWithSessionRetry(apiUrl("/api/chat"), {
         method: "POST",
         headers: getJsonApiHeaders(),
         body: JSON.stringify({
@@ -2876,7 +2879,19 @@ async function fetchWithSessionRetry(input: RequestInfo | URL, init?: RequestIni
 }
 
 async function refreshApiSession() {
-  await fetch("/api/providers", { cache: "no-store" });
+  await fetch(apiUrl("/api/providers"), { cache: "no-store" });
+}
+
+function apiUrl(path: string) {
+  return `${GATEWAY_PREFIX}${path}`;
+}
+
+function normalizeGatewayPrefix(value?: string) {
+  if (!value || value === "/") {
+    return "";
+  }
+
+  return `/${value.replace(/^\/+|\/+$/g, "")}`;
 }
 
 async function isInvalidApiSession(response: Response) {

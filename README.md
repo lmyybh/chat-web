@@ -31,6 +31,8 @@ npm run dev
 | `OPENAI_BASE_URL` | 默认 OpenAI 兼容接口地址，缺省为 `https://api.openai.com/v1`。 |
 | `OPENAI_COMPATIBLE_PROVIDERS` | 新数据库首次初始化时使用的提供方 JSON 数组。 |
 | `CHAT_WEB_DB_PATH` | 可选的 SQLite 文件路径，缺省为 `data/chat-web.sqlite`。 |
+| `NEXT_PUBLIC_GATEWAY_PREFIX` | 可选。网关以路径前缀转发、并在到达 Next.js 前剥离此前缀时，设置浏览器看到的前缀，例如 `/gateway/application`。修改后需要重新执行 `npm run build` 并重启。 |
+| `CHAT_WEB_ALLOWED_ORIGINS` | 可选。网关未传递原始主机信息时，允许 API 写操作的外部 Origin，多个值以逗号分隔。 |
 
 提供方也可以在设置面板中添加、编辑和删除。界面中录入的 API Key 保存在本机 SQLite 中，不会通过提供方查询接口返回浏览器；由环境变量提供的 Key 不会复制进数据库。
 

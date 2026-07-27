@@ -58,12 +58,29 @@ function getSessionToken() {
 }
 
 function isSameOrigin(request: Request, origin: string) {
+  if (getAllowedOrigins().includes(origin)) {
+    return true;
+  }
+
   try {
     const requestUrl = new URL(request.url);
-    return origin === `${requestUrl.protocol}//${requestUrl.host}`;
+    const protocol = firstForwardedHeader(request.headers.get("x-forwarded-proto")) || requestUrl.protocol.replace(":", "");
+    const host = firstForwardedHeader(request.headers.get("x-forwarded-host")) || request.headers.get("host") || requestUrl.host;
+    return origin === `${protocol}://${host}`;
   } catch {
     return false;
   }
+}
+
+function getAllowedOrigins() {
+  return (process.env.CHAT_WEB_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function firstForwardedHeader(value: string | null) {
+  return value?.split(",")[0]?.trim() || "";
 }
 
 function readCookie(cookieHeader: string | null, name: string) {
