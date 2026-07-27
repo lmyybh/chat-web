@@ -1304,7 +1304,7 @@ export default function Home() {
             <Dialog.Content className="settings-dialog">
               <aside className="settings-nav">
                 <Dialog.Title className="settings-heading">设置</Dialog.Title>
-                <Dialog.Description className="settings-description">管理模型提供方和默认对话行为。</Dialog.Description>
+                <Dialog.Description className="settings-description">管理模型提供方、模型和默认对话设置。</Dialog.Description>
                 <SettingsNavButton
                   active={settingsTab === "providers"}
                   icon={<KeyRound size={17} />}
@@ -1383,7 +1383,7 @@ export default function Home() {
                     <div className="settings-panel-header">
                       <div>
                         <h2>对话设置</h2>
-                        <p>配置新对话默认使用的系统提示词。</p>
+                        <p>配置默认对话分组在后续请求中使用的系统提示词。</p>
                       </div>
                     </div>
 

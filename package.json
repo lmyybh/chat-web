@@ -1,6 +1,7 @@
 {
   "name": "chat-web",
   "version": "0.1.0",
+  "description": "A local-first web assistant for OpenAI-compatible chat models.",
   "private": true,
   "scripts": {
     "dev": "next dev",
