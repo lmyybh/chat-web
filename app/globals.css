@@ -173,6 +173,10 @@ p {
   color: var(--danger);
 }
 
+.cancel-icon-button {
+  border: 1px solid var(--line-strong);
+}
+
 .new-chat-row {
   gap: 8px;
 }
@@ -1228,6 +1232,8 @@ select:focus {
 }
 
 .text-button.muted {
+  border-color: var(--line-strong);
+  background: var(--surface);
   color: var(--muted);
 }
 
@@ -1657,8 +1663,17 @@ select:focus {
 }
 
 .settings-form-actions {
+  justify-content: flex-end;
+  gap: 8px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.settings-form-actions .text-button,
+.settings-form-actions .primary-button {
+  width: 104px;
+  min-height: 40px;
+  padding: 8px 14px;
 }
 
 .model-section {
@@ -1726,8 +1741,18 @@ select:focus {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
 }
 
-.model-form.inline .primary-button {
-  grid-column: auto;
+.model-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-form.inline .model-form-actions .text-button,
+.model-form.inline .model-form-actions .primary-button {
+  width: auto;
+  min-height: 36px;
+  padding: 7px 12px;
+  font-size: 13px;
 }
 
 .model-edit-row {
@@ -1933,5 +1958,9 @@ select:focus {
 
   .model-form.inline .primary-button {
     grid-column: 1 / -1;
+  }
+
+  .model-form-actions {
+    justify-content: flex-end;
   }
 }

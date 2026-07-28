@@ -88,6 +88,7 @@ type ConfirmDialogState = {
 };
 
 const LAST_MODEL_KEY = "chat-web:last-model";
+const API_KEY_MASK = "************************";
 const GATEWAY_PREFIX = normalizeGatewayPrefix(process.env.NEXT_PUBLIC_GATEWAY_PREFIX);
 
 hljs.registerLanguage("bash", bashLanguage);
@@ -950,6 +951,12 @@ export default function Home() {
     }
   }
 
+  function handleCancelAddModel() {
+    setModelName("");
+    setModelId("");
+    setModelFormProviderId(null);
+  }
+
   async function handleAddProvider(event: FormEvent) {
     event.preventDefault();
     if (!newProviderId.trim() || !newProviderName.trim() || !newProviderBaseURL.trim()) {
@@ -1433,7 +1440,11 @@ export default function Home() {
                             />
                           </label>
                           <div className="settings-form-actions">
-                            <button className="text-button muted" type="button" onClick={() => setProviderDetailMode("view")}>
+                            <button
+                              className="text-button muted"
+                              type="button"
+                              onClick={() => setProviderDetailMode("view")}
+                            >
                               取消
                             </button>
                             <button className="primary-button" type="submit">
@@ -1475,10 +1486,17 @@ export default function Home() {
                             <span>API Key</span>
                             <input
                               type="password"
-                              value={providerApiKeyDraft}
-                              onChange={(event) => setProviderApiKeyDraft(event.target.value)}
+                              value={providerApiKeyDraft || (selectedProvider.hasApiKey ? API_KEY_MASK : "")}
+                              onChange={(event) => {
+                                setProviderApiKeyDraft(event.target.value === API_KEY_MASK ? "" : event.target.value);
+                              }}
+                              onFocus={(event) => {
+                                if (selectedProvider.hasApiKey && !providerApiKeyDraft) {
+                                  event.currentTarget.select();
+                                }
+                              }}
                               onBlur={() => void saveProviderDraft(selectedProvider)}
-                              placeholder={selectedProvider.hasApiKey ? "已保存，留空不修改" : "未配置"}
+                              placeholder="未配置"
                               autoComplete="new-password"
                             />
                           </label>
@@ -1506,7 +1524,14 @@ export default function Home() {
                             <form className="model-form inline" onSubmit={(event) => handleAddModel(event, selectedProvider.id)}>
                               <input placeholder="显示名称" value={modelName} onChange={(event) => setModelName(event.target.value)} />
                               <input placeholder="模型 ID" value={modelId} onChange={(event) => setModelId(event.target.value)} />
-                              <button className="primary-button">添加模型</button>
+                              <div className="model-form-actions">
+                                <button className="text-button compact muted" type="button" onClick={handleCancelAddModel}>
+                                  取消
+                                </button>
+                                <button className="primary-button" type="submit">
+                                  添加模型
+                                </button>
+                              </div>
                             </form>
                           )}
 
@@ -2775,7 +2800,7 @@ function ModelRow({
           <button className="icon-button" title="保存模型">
             <Check size={15} />
           </button>
-          <button className="icon-button" type="button" title="取消" onClick={onCancelEdit}>
+          <button className="icon-button cancel-icon-button" type="button" title="取消" onClick={onCancelEdit}>
             <X size={15} />
           </button>
         </div>
@@ -3007,10 +3032,40 @@ function extractText(node: ReactNode): string {
 }
 
 async function copyText(text: string) {
-  if (!navigator.clipboard) {
-    throw new Error("当前浏览器不支持剪贴板写入。");
+  const permissionsPolicy = (
+    document as Document & { permissionsPolicy?: { allowsFeature: (feature: string) => boolean } }
+  ).permissionsPolicy;
+  if (navigator.clipboard?.writeText && permissionsPolicy?.allowsFeature("clipboard-write") !== false) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back to selection-based copying for browsers that reject Clipboard API access.
+    }
   }
-  await navigator.clipboard.writeText(text);
+
+  if (!copyTextWithSelection(text)) {
+    throw new Error("当前浏览器不允许写入剪贴板。");
+  }
+}
+
+function copyTextWithSelection(text: string) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "-9999px";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+
+  try {
+    return document.execCommand("copy");
+  } finally {
+    textarea.remove();
+  }
 }
 
 function getChatPreview(chat: ChatSession) {
