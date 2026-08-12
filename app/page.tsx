@@ -242,6 +242,7 @@ export default function Home() {
     [view, workspace],
   );
   const activeLastMessageContent = activeChat?.messages.at(-1)?.content;
+  const activeLastMessageReasoningContent = activeChat?.messages.at(-1)?.reasoningContent;
   const selectedModel = useMemo(() => {
     if (!workspace?.models.length) {
       return null;
@@ -323,9 +324,11 @@ export default function Home() {
 
   useEffect(() => {
     if (stickToBottom.current) {
-      requestAnimationFrame(() => scrollMessagesToBottom("smooth"));
+      // Streaming updates arrive frequently; instant scrolling avoids queuing
+      // overlapping smooth-scroll animations that fight user navigation.
+      requestAnimationFrame(() => scrollMessagesToBottom("auto"));
     }
-  }, [activeChat?.messages.length, activeLastMessageContent]);
+  }, [activeChat?.messages.length, activeLastMessageContent, activeLastMessageReasoningContent]);
 
   useEffect(() => {
     if (!defaultPromptDirty.current) {
@@ -2516,11 +2519,26 @@ function ChatView({
   onCopyText: (text: string) => void;
   onStickToBottomChange: (sticks: boolean) => void;
 }) {
+  const previousScrollTop = useRef(0);
+  const previousChatId = useRef(chat.id);
+
+  useEffect(() => {
+    previousChatId.current = chat.id;
+    previousScrollTop.current = 0;
+  }, [chat.id]);
+
   return (
     <div
       className="message-list"
       ref={messageListRef}
-      onScroll={(event) => onStickToBottomChange(isNearBottom(event.currentTarget))}
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        const chatChanged = previousChatId.current !== chat.id;
+        const movedUp = !chatChanged && element.scrollTop < previousScrollTop.current;
+        previousChatId.current = chat.id;
+        previousScrollTop.current = element.scrollTop;
+        onStickToBottomChange(movedUp ? false : isNearBottom(element));
+      }}
     >
       {chat.messages.length === 0 ? (
         <div className="empty-state">
