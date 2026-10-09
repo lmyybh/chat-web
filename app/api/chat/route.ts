@@ -3,6 +3,7 @@ import { validateApiMutationRequest } from "../../lib/api-security";
 import { buildChatProviderRequestBody } from "../../lib/model-call-parameters";
 import { getProvider, getProviderAuthHeader } from "../../lib/providers";
 import { CompletionMessage } from "../../lib/types";
+import { randomUUID } from "crypto";
 
 type ChatRequest = {
   providerId: string;
@@ -54,6 +55,7 @@ export async function POST(request: Request) {
   }
 
   try {
+    const requestId = randomUUID();
     const response = await fetch(`${provider.baseURL}/chat/completions`, {
       method: "POST",
       headers: {
@@ -70,15 +72,40 @@ export async function POST(request: Request) {
       signal: request.signal,
     });
 
+    console.info("[chat] provider response", {
+      requestId,
+      providerId: provider.id,
+      model: body.model,
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+    });
+
     if (!response.ok || !response.body) {
-      const data = (await response.json().catch(() => ({}))) as ProviderError;
+      const rawBody = await response.text().catch(() => "");
+      console.error("[chat] provider HTTP error", {
+        requestId,
+        providerId: provider.id,
+        model: body.model,
+        status: response.status,
+        body: truncateForLog(rawBody),
+      });
+      let data: ProviderError = {};
+      try {
+        data = JSON.parse(rawBody) as ProviderError;
+      } catch {
+        // Keep the raw response in the diagnostic log when the provider returns HTML or plain text.
+      }
       return NextResponse.json(
         { error: data.error?.message || `Model provider returned HTTP ${response.status}.` },
         { status: response.status },
       );
     }
 
-    return new Response(streamProviderDeltas(response.body), {
+    return new Response(streamProviderDeltas(response.body, {
+      requestId,
+      providerId: provider.id,
+      model: body.model,
+    }), {
       headers: {
         "Cache-Control": "no-cache",
         "Content-Type": "text/event-stream; charset=utf-8",
@@ -89,6 +116,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Request aborted." }, { status: 499 });
     }
     const message = error instanceof Error ? error.message : "Unknown network error.";
+    console.error("[chat] provider request failed", { message });
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
@@ -121,7 +149,10 @@ function validateBody(body: ChatRequest) {
   return null;
 }
 
-function streamProviderDeltas(body: ReadableStream<Uint8Array>) {
+function streamProviderDeltas(
+  body: ReadableStream<Uint8Array>,
+  context: { requestId: string; providerId: string; model: string },
+) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
 
@@ -136,7 +167,9 @@ function streamProviderDeltas(body: ReadableStream<Uint8Array>) {
           if (done) {
             break;
           }
-          buffer += decoder.decode(value, { stream: true });
+          const chunk = decoder.decode(value, { stream: true });
+          console.info("[chat] provider raw chunk", { ...context, chunk: truncateForLog(chunk) });
+          buffer += chunk;
           const events = buffer.split(/\r?\n\r?\n/);
           buffer = events.pop() ?? "";
 
@@ -149,16 +182,27 @@ function streamProviderDeltas(body: ReadableStream<Uint8Array>) {
             if (!data || data === "[DONE]") {
               continue;
             }
+            console.info("[chat] provider SSE", { ...context, payload: truncateForLog(data) });
             if (payload.event === "error") {
               forwardStreamError(controller, encoder, readError(data) || "Provider stream failed.");
               continue;
             }
             const error = readError(data);
             if (error) {
+              console.error("[chat] provider stream error", { ...context, payload: truncateForLog(data) });
               forwardStreamError(controller, encoder, error);
               continue;
             }
-            const { delta, reasoningDelta } = readDelta(data);
+            const { delta, reasoningDelta, parseError } = readDelta(data);
+            if (parseError) {
+              console.error("[chat] invalid provider SSE payload", {
+                ...context,
+                payload: truncateForLog(data),
+                error: parseError,
+              });
+              forwardStreamError(controller, encoder, "Provider returned invalid JSON stream data.");
+              continue;
+            }
             if (delta || reasoningDelta) {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta, reasoningDelta })}\n\n`));
             }
@@ -168,6 +212,7 @@ function streamProviderDeltas(body: ReadableStream<Uint8Array>) {
         controller.close();
       } catch (error) {
         const message = error instanceof Error ? error.message : "Streaming failed.";
+        console.error("[chat] provider stream failed", { ...context, message });
         controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: message })}\n\n`));
         controller.close();
       } finally {
@@ -212,8 +257,12 @@ function readDelta(payload: string) {
       reasoningDelta: choice?.delta?.reasoning_content ?? choice?.message?.reasoning_content ?? "",
     };
   } catch {
-    return { delta: "", reasoningDelta: "" };
+    return { delta: "", reasoningDelta: "", parseError: "Invalid JSON" };
   }
+}
+
+function truncateForLog(value: string, maxLength = 16_000) {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...[truncated]` : value;
 }
 
 function readError(payload: string) {
