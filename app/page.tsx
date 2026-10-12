@@ -1,5 +1,7 @@
 "use client";
 
+import Image from "next/image";
+import appIcon from "./icon.png";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as ScrollArea from "@radix-ui/react-scroll-area";
@@ -1109,6 +1111,7 @@ export default function Home() {
         <aside className={sidebarOpen ? "sidebar open" : "sidebar"} aria-label="聊天导航">
           <div className="sidebar-header">
             <div className="brand-button" aria-label="Chat Web">
+              <Image src={appIcon} alt="" width={36} height={36} unoptimized className="brand-icon" />
               <strong>Chat Web</strong>
             </div>
           </div>

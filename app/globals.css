@@ -114,12 +114,20 @@ p {
 }
 
 .brand-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
   border: 0;
   background: transparent;
   color: var(--text);
   padding: 0 12px;
   text-align: left;
+}
+
+.brand-icon {
+  display: block;
+  flex-shrink: 0;
 }
 
 .brand-button strong {
