@@ -45,6 +45,7 @@ import { createPortal } from "react-dom";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { API_SESSION_COOKIE, API_SESSION_HEADER } from "./lib/api-session";
+import { ModelRow } from "./components/model-row";
 import { buildCompletionMessages } from "./lib/completion";
 import {
   ChatGroup,
@@ -185,6 +186,8 @@ export default function Home() {
   const [providerNameDraft, setProviderNameDraft] = useState("");
   const [providerBaseURLDraft, setProviderBaseURLDraft] = useState("");
   const [providerApiKeyDraft, setProviderApiKeyDraft] = useState("");
+  const [providerTestRevision, setProviderTestRevision] = useState(0);
+  const providerSaveRef = useRef<{ signature: string; promise: Promise<void> } | null>(null);
 
   const abortControllers = useRef(new Map<string, AbortController>());
   const streamContent = useRef(new Map<string, string>());
@@ -986,28 +989,54 @@ export default function Home() {
     }
   }
 
-  async function saveProviderDraft(provider: PublicProvider) {
+  async function saveProviderDraft(provider: PublicProvider): Promise<void> {
     if (!providerNameDraft.trim() || !providerBaseURLDraft.trim()) {
-      return;
+      throw new Error("供应商名称和 Base URL 不能为空。");
+    }
+    const payload = {
+      id: provider.id,
+      name: providerNameDraft,
+      baseURL: providerBaseURLDraft,
+      apiKey: providerApiKeyDraft,
+    };
+    const signature = JSON.stringify(payload);
+    const pending = providerSaveRef.current;
+    if (pending) {
+      await pending.promise;
+      if (pending.signature === signature) return;
     }
     const hasChanges =
       providerNameDraft.trim() !== provider.name ||
       normalizeBaseURLDraft(providerBaseURLDraft) !== provider.baseURL ||
       Boolean(providerApiKeyDraft.trim());
-    if (!hasChanges) {
-      return;
-    }
-    try {
-      await runProviderAction("PUT", {
-        id: provider.id,
-        name: providerNameDraft,
-        baseURL: providerBaseURLDraft,
-        apiKey: providerApiKeyDraft,
-      });
-      setProviderApiKeyDraft("");
+    if (!hasChanges) return;
+    const promise = (async () => {
+      await runProviderAction("PUT", payload);
+      setProviderApiKeyDraft((current) => current === payload.apiKey ? "" : current);
       setUiError(null);
-    } catch (error) {
-      showUiError(error, "供应商保存失败。");
+    })();
+    providerSaveRef.current = { signature, promise };
+    try {
+      await promise;
+    } finally {
+      if (providerSaveRef.current?.promise === promise) providerSaveRef.current = null;
+    }
+  }
+
+  async function testModel(model: ModelConfig, provider: PublicProvider, signal: AbortSignal) {
+    await saveProviderDraft(provider);
+    signal.throwIfAborted();
+    const response = await fetchWithSessionRetry(apiUrl("/api/models/test"), {
+      method: "POST",
+      headers: getJsonApiHeaders(),
+      body: JSON.stringify({ providerId: model.providerId, model: model.model }),
+      signal,
+    });
+    const raw = await response.text();
+    let data;
+    try { data = JSON.parse(raw); } catch { /* Preserve non-JSON error responses. */ }
+    if (!response.ok || data?.ok !== true) {
+      throw new Error(typeof data?.error === "string" ? data.error : `HTTP ${response.status}\n\n${raw}`);
     }
   }
 
@@ -1476,16 +1505,16 @@ export default function Home() {
                             <span>名称</span>
                             <input
                               value={providerNameDraft}
-                              onChange={(event) => setProviderNameDraft(event.target.value)}
-                              onBlur={() => void saveProviderDraft(selectedProvider)}
+                              onChange={(event) => { setProviderNameDraft(event.target.value); setProviderTestRevision((value) => value + 1); }}
+                              onBlur={() => void saveProviderDraft(selectedProvider).catch((error) => showUiError(error, "供应商保存失败。"))}
                             />
                           </label>
                           <label className="field-block">
                             <span>Base URL</span>
                             <input
                               value={providerBaseURLDraft}
-                              onChange={(event) => setProviderBaseURLDraft(event.target.value)}
-                              onBlur={() => void saveProviderDraft(selectedProvider)}
+                              onChange={(event) => { setProviderBaseURLDraft(event.target.value); setProviderTestRevision((value) => value + 1); }}
+                              onBlur={() => void saveProviderDraft(selectedProvider).catch((error) => showUiError(error, "供应商保存失败。"))}
                             />
                           </label>
                           <label className="field-block">
@@ -1495,13 +1524,14 @@ export default function Home() {
                               value={providerApiKeyDraft || (selectedProvider.hasApiKey ? API_KEY_MASK : "")}
                               onChange={(event) => {
                                 setProviderApiKeyDraft(event.target.value === API_KEY_MASK ? "" : event.target.value);
+                                setProviderTestRevision((value) => value + 1);
                               }}
                               onFocus={(event) => {
                                 if (selectedProvider.hasApiKey && !providerApiKeyDraft) {
                                   event.currentTarget.select();
                                 }
                               }}
-                              onBlur={() => void saveProviderDraft(selectedProvider)}
+                              onBlur={() => void saveProviderDraft(selectedProvider).catch((error) => showUiError(error, "供应商保存失败。"))}
                               placeholder="未配置"
                               autoComplete="new-password"
                             />
@@ -1547,7 +1577,8 @@ export default function Home() {
                             ) : (
                               selectedProviderModels.map((model) => (
                                 <ModelRow
-                                  key={model.id}
+                                  key={`${model.id}:${model.model}:${providerTestRevision}`}
+                                  onTest={(signal) => testModel(model, selectedProvider, signal)}
                                   model={model}
                                   active={model.id === selectedModel.id}
                                   editing={editingModelId === model.id}
@@ -1613,7 +1644,7 @@ function TooltipIconButton({
   return (
     <Tooltip.Root>
       <Tooltip.Trigger asChild>
-        <button className={tone === "danger" ? "icon-button danger" : "icon-button"} type="button" onClick={onClick}>
+        <button aria-label={label} className={tone === "danger" ? "icon-button danger" : "icon-button"} type="button" onClick={onClick}>
           {children}
         </button>
       </Tooltip.Trigger>
@@ -2785,65 +2816,6 @@ function ReasoningPanel({
   );
 }
 
-function ModelRow({
-  model,
-  active,
-  editing,
-  editingName,
-  editingModel,
-  onEditingNameChange,
-  onEditingModelChange,
-  onSubmitEdit,
-  onStartEdit,
-  onCancelEdit,
-  onSelect,
-  onDelete,
-}: {
-  model: ModelConfig;
-  active: boolean;
-  editing: boolean;
-  editingName: string;
-  editingModel: string;
-  onEditingNameChange: (value: string) => void;
-  onEditingModelChange: (value: string) => void;
-  onSubmitEdit: (event: FormEvent) => void;
-  onStartEdit: () => void;
-  onCancelEdit: () => void;
-  onSelect: () => void;
-  onDelete: () => void;
-}) {
-  if (editing) {
-    return (
-      <form className="model-edit-row" onSubmit={onSubmitEdit}>
-        <input placeholder="显示名称" value={editingName} onChange={(event) => onEditingNameChange(event.target.value)} />
-        <input placeholder="模型 ID" value={editingModel} onChange={(event) => onEditingModelChange(event.target.value)} />
-        <div className="model-edit-actions">
-          <button className="icon-button" title="保存模型">
-            <Check size={15} />
-          </button>
-          <button className="icon-button cancel-icon-button" type="button" title="取消" onClick={onCancelEdit}>
-            <X size={15} />
-          </button>
-        </div>
-      </form>
-    );
-  }
-
-  return (
-    <div className={active ? "model-row active" : "model-row"}>
-      <button className="model-name" type="button" onClick={onSelect}>
-        <strong>{model.name}</strong>
-        <span>{model.model}</span>
-      </button>
-      <button className="icon-button" type="button" title="编辑模型" onClick={onStartEdit}>
-        <Pencil size={15} />
-      </button>
-      <button className="icon-button danger" type="button" title="删除模型" onClick={onDelete}>
-        <Trash2 size={15} />
-      </button>
-    </div>
-  );
-}
 
 function createMarkdownComponents(onCopyText: (text: string) => void): Components {
   return {
